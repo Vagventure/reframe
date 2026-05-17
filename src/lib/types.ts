@@ -16,6 +16,13 @@ export interface EditRecipe {
   saturation: number;
 }
 
+export interface BackgroundMusicOptions {
+  file: File | null;
+  musicVolume: number;
+  originalAudioVolume: number;
+  loopMusic: boolean;
+}
+
 export interface ExportResult {
   blobUrl: string;
   size: number;

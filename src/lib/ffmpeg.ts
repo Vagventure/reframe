@@ -1,6 +1,6 @@
 import { FFmpeg } from "@ffmpeg/ffmpeg";
 import { fetchFile, toBlobURL } from "@ffmpeg/util";
-import { EditRecipe, ExportResult } from "./types";
+import { EditRecipe, ExportResult, BackgroundMusicOptions } from "./types";
 import { getPresetById } from "./presets";
 import { simd } from "wasm-feature-detect";
 
@@ -31,7 +31,8 @@ export async function loadFFmpeg(signal?: AbortSignal): Promise<FFmpeg> {
     const isSimdSupported = await simd();
 
     // Dynamically set the core filename
-    const coreName = isSimdSupported ? "ffmpeg-core-simd" : "ffmpeg-core";
+    // const coreName = isSimdSupported ? "ffmpeg-core-simd" : "ffmpeg-core";
+    const coreName = "ffmpeg-core";
 
     // Load FFmpeg using the dynamic URLs + the new signal parameter
     await ffmpeg.load({
@@ -110,7 +111,8 @@ export async function exportVideo(
   file: File,
   recipe: EditRecipe,
   onProgress: (percent: number) => void,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  musicOptions?: BackgroundMusicOptions
 ): Promise<ExportResult> {
   let targetW: number, targetH: number;
   if (recipe.preset === "custom") {
@@ -145,6 +147,13 @@ export async function exportVideo(
 
   await ffmpeg.writeFile(inputName, await fetchFile(file), { signal });
 
+  // Write music file into FFmpeg FS if provided
+  const hasMusicTrack = !!(musicOptions?.file && recipe.keepAudio);
+  const musicInputName = "music_input.mp3";
+  if (hasMusicTrack) {
+    await ffmpeg.writeFile(musicInputName, await fetchFile(musicOptions!.file!), { signal });
+  }
+
   ffmpeg.on("progress", ({ progress }) => {
     onProgress(Math.min(99, Math.round(progress * 100)));
   });
@@ -155,12 +164,42 @@ export async function exportVideo(
   const afParts = [audioTrim, audioSpeed].filter(Boolean);
   const af = afParts.join(",");
 
-  const args = ["-i", inputName];
+  // Build args — with or without background music
+  const args: string[] = [];
+
+  args.push("-i", inputName);
+
+  if (hasMusicTrack) {
+    if (musicOptions!.loopMusic) {
+      // stream_loop must immediately precede the input it applies to (the music)
+      args.push("-stream_loop", "-1");
+    }
+    args.push("-i", musicInputName);
+  }
+
   if (vf) args.push("-vf", vf);
 
   if (!recipe.keepAudio) {
+    // No audio at all
     args.push("-an");
+  } else if (hasMusicTrack) {
+    // Mix original audio + background music via filter_complex.
+    // Volume handles muting — setting either to 0 silences that stream.
+    const musicVol = (musicOptions!.musicVolume  / 100).toFixed(2);
+    const origVol  = (musicOptions!.originalAudioVolume / 100).toFixed(2);
+
+    const origChain = afParts.length > 0
+      ? `[0:a]${afParts.join(",")},volume=${origVol}[orig]`
+      : `[0:a]volume=${origVol}[orig]`;
+
+    const filterComplex =
+      `${origChain};` +
+      `[1:a]volume=${musicVol}[music];` +
+      `[orig][music]amix=inputs=2:duration=first:dropout_transition=0[aout]`;
+
+    args.push("-filter_complex", filterComplex, "-map", "0:v", "-map", "[aout]");
   } else if (af) {
+    // Standard single-track audio filter (no music)
     args.push("-af", af);
   }
 
@@ -202,15 +241,41 @@ export async function exportVideo(
   // If the requested format fails, try WebM as fallback
   if (exitCode !== 0) {
     const webmOutput = "output.webm";
-    const fallbackArgs = [
-      "-i", inputName,
-      ...(vf ? ["-vf", vf] : []),
-      ...(recipe.keepAudio ? (af ? ["-af", af] : []) : ["-an"]),
+
+    const fallbackArgs: string[] = [];
+    fallbackArgs.push("-i", inputName);
+    if (hasMusicTrack) {
+      if (musicOptions!.loopMusic) fallbackArgs.push("-stream_loop", "-1");
+      fallbackArgs.push("-i", musicInputName);
+    }
+    if (vf) fallbackArgs.push("-vf", vf);
+
+    if (!recipe.keepAudio) {
+      fallbackArgs.push("-an");
+    } else if (hasMusicTrack) {
+      const musicVol = (musicOptions!.musicVolume  / 100).toFixed(2);
+      const origVol  = (musicOptions!.originalAudioVolume / 100).toFixed(2);
+
+      const origChain = afParts.length > 0
+        ? `[0:a]${afParts.join(",")},volume=${origVol}[orig]`
+        : `[0:a]volume=${origVol}[orig]`;
+
+      const filterComplex =
+        `${origChain};` +
+        `[1:a]volume=${musicVol}[music];` +
+        `[orig][music]amix=inputs=2:duration=first:dropout_transition=0[aout]`;
+
+      fallbackArgs.push("-filter_complex", filterComplex, "-map", "0:v", "-map", "[aout]");
+    } else if (af) {
+      fallbackArgs.push("-af", af);
+    }
+
+    fallbackArgs.push(
       "-c:v", "libvpx-vp9",
       "-crf", String(recipe.quality),
       ...(recipe.keepAudio ? ["-c:a", "libopus"] : []),
       webmOutput,
-    ];
+    );
 
     const fallbackCode = await ffmpeg.exec(fallbackArgs, undefined, { signal });
     if (fallbackCode !== 0) throw new Error("Export failed");
@@ -219,6 +284,7 @@ export async function exportVideo(
     const blob = new Blob([new Uint8Array(data as Uint8Array)], { type: "video/webm" });
     await ffmpeg.deleteFile(inputName, { signal });
     await ffmpeg.deleteFile(webmOutput, { signal });
+    if (hasMusicTrack) await ffmpeg.deleteFile(musicInputName, { signal });
 
     onProgress(100);
     return {
@@ -234,6 +300,7 @@ export async function exportVideo(
   const blob = new Blob([new Uint8Array(data as Uint8Array)], { type: mimeType });
   await ffmpeg.deleteFile(inputName, { signal });
   await ffmpeg.deleteFile(outputName, { signal });
+  if (hasMusicTrack) await ffmpeg.deleteFile(musicInputName, { signal });
 
   onProgress(100);
   return {
