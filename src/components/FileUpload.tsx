@@ -119,7 +119,7 @@ export default function FileUpload({
 
         <div className="flex-1 min-w-0">
           <div className="flex flex-wrap items-center gap-2 mb-0.5">
-            <p className="text-sm font-semibold text-gray-800 truncate max-w-[320px] xl:max-w-[420px]">
+            <p className="text-sm font-semibold text-film-700 truncate max-w-[320px] xl:max-w-[420px]">
               {currentFile?.name}
             </p>
             {currentFile && (
