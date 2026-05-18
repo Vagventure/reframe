@@ -10,10 +10,11 @@ export interface EditRecipe {
   speed: number;
   quality: number;
   format: "mp4" | "webm" | "mkv";
-
+  stabilization: boolean;
   brightness: number;
   contrast: number;
   saturation: number;
+  soundOnCompletion: boolean;
 }
 
 export type OverlayPosition = "top-left" | "top-right" | "bottom-left" | "bottom-right";
@@ -64,6 +65,8 @@ export const DEFAULT_RECIPE: EditRecipe = {
   brightness: 0,
   contrast: 0,
   saturation: 0,
+  stabilization: false,
+  soundOnCompletion: false,
 };
 
 export const MAX_FILE_SIZE =

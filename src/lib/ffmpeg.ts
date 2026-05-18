@@ -8,6 +8,9 @@ const CORE_BASE_URL = "https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.10/dist/um
 
 let ffmpegInstance: FFmpeg | null = null;
 
+/**
+ * Error thrown when the FFmpeg WebAssembly core fails to load.
+ */
 export class FFmpegLoadError extends Error {
   constructor(message: string) {
     super(message);
@@ -15,33 +18,54 @@ export class FFmpegLoadError extends Error {
   }
 }
 
-export async function loadFFmpeg(signal?: AbortSignal): Promise<FFmpeg> {
-  if (ffmpegInstance?.loaded) return ffmpegInstance;
+export async function loadFFmpeg(
+  signal?: AbortSignal, 
+  onProgress?: (percent: number) => void
+): Promise<FFmpeg> {
+  if (ffmpegInstance?.loaded) {
+    onProgress?.(100);
+    return ffmpegInstance;
+  }
 
   const ffmpeg = ffmpegInstance ?? new FFmpeg();
   ffmpegInstance = ffmpeg;
 
+  const handleProgress = ({ progress }: { progress: number }) => {
+    onProgress?.(Math.round(progress * 100));
+  };
+
   try {
+    ffmpeg.on("progress", handleProgress);
     const isSimdSupported = await simd();
-    const coreName = "ffmpeg-core";
+    const coreName = isSimdSupported ? "ffmpeg-core-simd" : "ffmpeg-core";
 
     await ffmpeg.load({
       coreURL: await toBlobURL(`${CORE_BASE_URL}/${coreName}.js`, "text/javascript"),
       wasmURL: await toBlobURL(`${CORE_BASE_URL}/${coreName}.wasm`, "application/wasm"),
     }, { signal });
 
+    onProgress?.(100);
     return ffmpeg;
   } catch (err) {
     if (ffmpegInstance === ffmpeg) {
       ffmpegInstance = null;
     }
-    throw new FFmpegLoadError("The ffmpeg cdn could not load. Please check your internet connection.");
+    throw new FFmpegLoadError("Failed to load the FFmpeg engine. Check your internet connection.");
+  } finally {
+    ffmpeg.off("progress", handleProgress);
   }
 }
 
 export function terminateFFmpeg() {
   ffmpegInstance?.terminate();
   ffmpegInstance = null;
+}
+
+function buildSessionId(): string {
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
+    return crypto.randomUUID();
+  }
+  return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
 function buildVideoFilter(recipe: EditRecipe, targetW: number, targetH: number): string {
@@ -83,11 +107,27 @@ function buildVideoFilter(recipe: EditRecipe, targetW: number, targetH: number):
   return filters.join(",");
 }
 
-function buildAudioFilter(speed: number): string {
+export function buildAudioFilter(speed: number): string {
   if (speed === 1) return "";
-  if (speed === 0.25) return "atempo=0.5,atempo=0.5";
-  if (speed === 4) return "atempo=2.0,atempo=2.0";
-  return `atempo=${speed}`;
+
+  const filters: string[] = [];
+  let remaining = speed;
+
+  while (remaining < 0.5) {
+    filters.push("atempo=0.5");
+    remaining /= 0.5;
+  }
+
+  while (remaining > 2.0) {
+    filters.push("atempo=2.0");
+    remaining /= 2.0;
+  }
+
+  if (Math.abs(remaining - 1.0) > 0.001) {
+    filters.push(`atempo=${Number(remaining.toFixed(4))}`);
+  }
+
+  return filters.join(",");
 }
 
 function buildAudioTrimFilter(recipe: EditRecipe): string {
@@ -96,9 +136,6 @@ function buildAudioTrimFilter(recipe: EditRecipe): string {
   return `atrim=start=${recipe.trimStart}:end=${end},asetpts=PTS-STARTPTS`;
 }
 
-/**
- * Constructs the compilation arguments dynamically based on whether an original audio stream exists.
- */
 function buildArguments(
   recipe: EditRecipe,
   format: "mp4" | "webm" | "mkv",
@@ -174,7 +211,6 @@ function buildArguments(
           filterParts.push(`[orig][music]amix=inputs=2:duration=first:dropout_transition=0[aout]`);
           audioOut = "[aout]";
         } else {
-          // If video has no audio track but a track is provided, process music stream directly
           filterParts.push(`[${musicIdx}:a]volume=${musicVol}[aout]`);
           audioOut = "[aout]";
         }
@@ -206,7 +242,7 @@ function buildArguments(
   }
 
   if (format === "webm") {
-    args.push("-c:v", "libvpx-vp9", "-crf", String(recipe.quality));
+    args.push("-c:v", "libvpx-vp9", "-b:v", "0", "-crf", String(recipe.quality));
     if (shouldKeepAudio) args.push("-c:a", "libopus");
   } else if (format === "mkv") {
     args.push("-c:v", "libx264", "-crf", String(recipe.quality), "-preset", "medium");
@@ -229,6 +265,7 @@ export async function exportVideo(
   musicOptions?: BackgroundMusicOptions,
   overlayOptions?: ImageOverlayOptions
 ): Promise<ExportResult> {
+  const sessionId = buildSessionId();
   let targetW: number, targetH: number;
   if (recipe.preset === "custom") {
     targetW = recipe.customWidth;
@@ -243,122 +280,125 @@ export async function exportVideo(
   targetH = Math.round(targetH / 2) * 2;
 
   const ext = file.name.split(".").pop() ?? "mp4";
-  const inputName = `input.${ext}`;
+  const inputName = `input_${sessionId}.${ext}`;
 
   const getOutputConfig = (format: string) => {
     switch (format) {
       case "webm":
-        return { filename: "output.webm", mimeType: "video/webm" };
+        return { filename: `output_${sessionId}.webm`, mimeType: "video/webm" };
       case "mkv":
-        return { filename: "output.mkv", mimeType: "video/x-matroska" };
+        return { filename: `output_${sessionId}.mkv`, mimeType: "video/x-matroska" };
       default:
-        return { filename: "output.mp4", mimeType: "video/mp4" };
+        return { filename: `output_${sessionId}.mp4`, mimeType: "video/mp4" };
     }
   };
 
   const { filename: outputName, mimeType } = getOutputConfig(recipe.format);
+  const fallbackOutputName = `fallback_${sessionId}.webm`;
+  const cleanupFiles = new Set<string>([inputName, outputName, fallbackOutputName]);
 
-  await ffmpeg.writeFile(inputName, await fetchFile(file), { signal });
-
-  const hasMusicTrack = !!(musicOptions?.file && recipe.keepAudio);
-  const musicInputName = "music_input.mp3";
-  if (hasMusicTrack) {
-    await ffmpeg.writeFile(musicInputName, await fetchFile(musicOptions!.file!), { signal });
-  }
-
-  const hasOverlay = !!(overlayOptions?.file);
-  const overlayExt = overlayOptions?.file?.name.split(".").pop() ?? "png";
-  const overlayInputName = `overlay.${overlayExt}`;
-  if (hasOverlay) {
-    await ffmpeg.writeFile(overlayInputName, await fetchFile(overlayOptions!.file!), { signal });
-  }
-
-  ffmpeg.on("progress", ({ progress }) => {
+  const handleProgress = ({ progress }: { progress: number }) => {
     onProgress(Math.min(99, Math.round(progress * 100)));
-  });
-
-  // Track if FFmpeg logs indicate a missing audio stream
-  let missingAudioDetected = false;
-  const logListener = ({ message }: { message: string }) => {
-    const msg = message.toLowerCase();
-    if (
-      msg.includes("matches no streams") ||
-      msg.includes("specifier '0:a'") ||
-      msg.includes("input pad 0 on filter src")
-    ) {
-      missingAudioDetected = true;
-    }
   };
-  ffmpeg.on("log", logListener);
 
-  // Attempt 1: Assume audio exists
-  let args = buildArguments(
-    recipe, recipe.format, outputName, inputName, targetW, targetH,
-    hasMusicTrack, musicInputName, musicOptions,
-    hasOverlay, overlayInputName, overlayOptions, true
-  );
+  try {
+    await ffmpeg.writeFile(inputName, await fetchFile(file), { signal });
 
-  let exitCode = await ffmpeg.exec(args, undefined, { signal });
+    const hasMusicTrack = !!(musicOptions?.file && recipe.keepAudio);
+    const musicInputName = `music_input_${sessionId}.mp3`;
+    if (hasMusicTrack) {
+      await ffmpeg.writeFile(musicInputName, await fetchFile(musicOptions!.file!), { signal });
+      cleanupFiles.add(musicInputName);
+    }
 
-  // Attempt 2: Auto-retry without source audio if stream execution panics
-  if (exitCode !== 0 && missingAudioDetected) {
-    missingAudioDetected = false;
-    args = buildArguments(
+    const hasOverlay = !!(overlayOptions?.file);
+    const overlayExt = overlayOptions?.file?.name.split(".").pop() ?? "png";
+    const overlayInputName = `overlay_${sessionId}.${overlayExt}`;
+    if (hasOverlay) {
+      await ffmpeg.writeFile(overlayInputName, await fetchFile(overlayOptions!.file!), { signal });
+      cleanupFiles.add(overlayInputName);
+    }
+
+    ffmpeg.on("progress", handleProgress);
+
+    let missingAudioDetected = false;
+    const logListener = ({ message }: { message: string }) => {
+      const msg = message.toLowerCase();
+      if (
+        msg.includes("matches no streams") ||
+        msg.includes("specifier '0:a'") ||
+        msg.includes("input pad 0 on filter src")
+      ) {
+        missingAudioDetected = true;
+      }
+    };
+    ffmpeg.on("log", logListener);
+
+    // Attempt 1: Process with standard audio streams
+    let args = buildArguments(
       recipe, recipe.format, outputName, inputName, targetW, targetH,
       hasMusicTrack, musicInputName, musicOptions,
-      hasOverlay, overlayInputName, overlayOptions, false
-    );
-    exitCode = await ffmpeg.exec(args, undefined, { signal });
-  }
-
-  // Fallback Attempt 3: Switch codecs entirely to WebM if container restrictions error out
-  if (exitCode !== 0) {
-    const webmOutput = "output.webm";
-    args = buildArguments(
-      recipe, "webm", webmOutput, inputName, targetW, targetH,
-      hasMusicTrack, musicInputName, musicOptions,
-      hasOverlay, overlayInputName, overlayOptions, !missingAudioDetected
+      hasOverlay, overlayInputName, overlayOptions, true
     );
 
-    const fallbackCode = await ffmpeg.exec(args, undefined, { signal });
-    if (fallbackCode !== 0) throw new Error("Export failed");
+    let exitCode = await ffmpeg.exec(args, undefined, { signal });
 
-    const data = await ffmpeg.readFile(webmOutput, undefined, { signal });
-    const blob = new Blob([new Uint8Array(data as Uint8Array)], { type: "video/webm" });
-    
-    await ffmpeg.deleteFile(inputName, { signal });
-    await ffmpeg.deleteFile(webmOutput, { signal });
-    if (hasMusicTrack) await ffmpeg.deleteFile(musicInputName, { signal });
-    if (hasOverlay) await ffmpeg.deleteFile(overlayInputName, { signal });
+    // Attempt 2: Auto-recover if the file has no original audio track
+    if (exitCode !== 0 && missingAudioDetected) {
+      missingAudioDetected = false;
+      args = buildArguments(
+        recipe, recipe.format, outputName, inputName, targetW, targetH,
+        hasMusicTrack, musicInputName, musicOptions,
+        hasOverlay, overlayInputName, overlayOptions, false
+      );
+      exitCode = await ffmpeg.exec(args, undefined, { signal });
+    }
+
+    // Fallback Attempt 3: Switch codecs to WebM if container errors happen
+    if (exitCode !== 0) {
+      args = buildArguments(
+        recipe, "webm", fallbackOutputName, inputName, targetW, targetH,
+        hasMusicTrack, musicInputName, musicOptions,
+        hasOverlay, overlayInputName, overlayOptions, !missingAudioDetected
+      );
+
+      const fallbackCode = await ffmpeg.exec(args, undefined, { signal });
+      if (fallbackCode !== 0) throw new Error("Export failed");
+
+      const data = await ffmpeg.readFile(fallbackOutputName, undefined, { signal });
+      const blob = new Blob([new Uint8Array(data as Uint8Array)], { type: "video/webm" });
+
+      ffmpeg.off("log", logListener);
+      onProgress(100);
+      return {
+        blobUrl: URL.createObjectURL(blob),
+        size: blob.size,
+        width: targetW,
+        height: targetH,
+        format: "webm",
+      };
+    }
+
+    const data = await ffmpeg.readFile(outputName, undefined, { signal });
+    const blob = new Blob([new Uint8Array(data as Uint8Array)], { type: mimeType });
+
     ffmpeg.off("log", logListener);
-
     onProgress(100);
     return {
       blobUrl: URL.createObjectURL(blob),
       size: blob.size,
       width: targetW,
       height: targetH,
-      format: "webm",
+      format: recipe.format as "mp4" | "webm" | "mkv",
     };
+  } finally { // FIXED: Restored missing explicit block keyword
+    ffmpeg.off("progress", handleProgress);
+    for (const path of cleanupFiles) {
+      try {
+        await ffmpeg.deleteFile(path);
+      } catch {}
+    }
   }
-
-  const data = await ffmpeg.readFile(outputName, undefined, { signal });
-  const blob = new Blob([new Uint8Array(data as Uint8Array)], { type: mimeType });
-  
-  await ffmpeg.deleteFile(inputName, { signal });
-  await ffmpeg.deleteFile(outputName, { signal });
-  if (hasMusicTrack) await ffmpeg.deleteFile(musicInputName, { signal });
-  if (hasOverlay) await ffmpeg.deleteFile(overlayInputName, { signal });
-  ffmpeg.off("log", logListener);
-
-  onProgress(100);
-  return {
-    blobUrl: URL.createObjectURL(blob),
-    size: blob.size,
-    width: targetW,
-    height: targetH,
-    format: recipe.format as "mp4" | "webm" | "mkv",
-  };
 }
 
 export function formatBytes(bytes: number): string {
