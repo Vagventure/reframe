@@ -1,10 +1,30 @@
 import { FFmpeg } from "@ffmpeg/ffmpeg";
-import { fetchFile, toBlobURL } from "@ffmpeg/util";
+import { fetchFile } from "@ffmpeg/util";
 import { EditRecipe, ExportResult, BackgroundMusicOptions, ImageOverlayOptions } from "./types";
 import { getPresetById } from "./presets";
 import { simd } from "wasm-feature-detect";
 
 const CORE_BASE_URL = "https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.10/dist/umd";
+
+// Added from main branch for subresource security verification
+const SRI_HASHES: Record<string, string> = {
+  "ffmpeg-core.js":   "sha384-sKfkiFtvUk+vexk+0EUhEh366190/4WpgUAsUvaxEfyg7+E1Zt5Y5hrsU808g8Q9",
+  "ffmpeg-core.wasm": "sha384-U1VDhkPYrM3wTCT4/vjSpSsKqG/UjljYrYCI4hBSJ02svbCkxuCi6U6u/peg5vpW",
+};
+
+// Added from main branch to perform secure binary verification
+async function fetchWithIntegrity(url: string, mimeType: string): Promise<string> {
+  const key = url.split("/").pop()!;
+  const integrity = SRI_HASHES[key];
+
+  if (!integrity) {
+    throw new Error(`[SRI] No hash found for: ${key}`);
+  }
+
+  const res = await fetch(url, { integrity, credentials: "omit" });
+  const blob = new Blob([await res.arrayBuffer()], { type: mimeType });
+  return URL.createObjectURL(blob);
+}
 
 let ffmpegInstance: FFmpeg | null = null;
 
@@ -36,12 +56,11 @@ export async function loadFFmpeg(
 
   try {
     ffmpeg.on("progress", handleProgress);
-    const isSimdSupported = await simd();
-    const coreName = isSimdSupported ? "ffmpeg-core-simd" : "ffmpeg-core";
 
+    // Secure engine load using verified runtime checksum hashes from main
     await ffmpeg.load({
-      coreURL: await toBlobURL(`${CORE_BASE_URL}/${coreName}.js`, "text/javascript"),
-      wasmURL: await toBlobURL(`${CORE_BASE_URL}/${coreName}.wasm`, "application/wasm"),
+      coreURL: await fetchWithIntegrity(`${CORE_BASE_URL}/ffmpeg-core.js`, "text/javascript"),
+      wasmURL: await fetchWithIntegrity(`${CORE_BASE_URL}/ffmpeg-core.wasm`, "application/wasm"),
     }, { signal });
 
     onProgress?.(100);
@@ -83,6 +102,11 @@ function buildVideoFilter(recipe: EditRecipe, targetW: number, targetH: number):
     filters.push("transpose=1,transpose=1");
   } else if (recipe.rotate === 270) {
     filters.push("transpose=2");
+  }
+
+  // Integrated from main branch layout enhancements
+  if ((recipe as any).stabilization) {
+    filters.push("deshake=x=-1:y=-1:w=-1:h=-1:rx=16:ry=16");
   }
 
   if (recipe.framing === "fit") {
@@ -391,7 +415,7 @@ export async function exportVideo(
       height: targetH,
       format: recipe.format as "mp4" | "webm" | "mkv",
     };
-  } finally { // FIXED: Restored missing explicit block keyword
+  } finally {
     ffmpeg.off("progress", handleProgress);
     for (const path of cleanupFiles) {
       try {
