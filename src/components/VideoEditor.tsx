@@ -12,6 +12,8 @@ import FormatSelector from "./FormatSelector";
 import ExportSettings from "./ExportSettings";
 import ExportOverlay from "./ExportOverlay";
 import DownloadResult from "./DownloadResult";
+// import BackgroundMusic from "./BackgroundMusic";
+import ImageOverlay from "./ImageOverlay"
 import { cn } from "@/lib/utils";
 import {
   Layers, Crop, Scissors, RotateCw, Volume2,
@@ -48,9 +50,17 @@ export default function VideoEditor() {
     file, duration, recipe, status, progress,
     result, error, updateRecipe,
     handleFileSelect, handleExport, cancelExport, reset, resetSettings,
+    musicFile, setMusicFile,
+    musicVolume, setMusicVolume,
+    originalAudioVolume, setOriginalAudioVolume,
+    loopMusic, setLoopMusic,
+    overlayFile, setOverlayFile,
+    overlayPosition, setOverlayPosition,
+    overlaySize, setOverlaySize,
+    overlayOpacity, setOverlayOpacity,
   } = useVideoEditor();
 
-  
+
   const isProcessing = status === "loading-engine" || status === "exporting";
 
   return (
@@ -81,10 +91,10 @@ export default function VideoEditor() {
               <FileUpload onFileSelect={handleFileSelect} currentFile={file} />
 
               {!file && (
-              <div className="text-center text-gray-500 py-6">
-                <p>Upload a video to get started</p>
-                <p className="text-sm">Supports MP4, MOV, WebM and more</p>
-              </div>
+                <div className="text-center text-gray-500 py-6">
+                  <p>Upload a video to get started</p>
+                  <p className="text-sm">Supports MP4, MOV, WebM and more</p>
+                </div>
               )}
 
               {file && (
@@ -98,7 +108,7 @@ export default function VideoEditor() {
               <p className="text-yellow-400 text-sm">
                 ⚠️ Large file — processing may take several minutes
               </p>
-            )}      
+            )}
             {file && (
               <div className={cn(
                 "grid grid-cols-1 sm:grid-cols-2 gap-4",
@@ -111,105 +121,117 @@ export default function VideoEditor() {
                   <Section icon={<RotateCw size={12} />} title="Rotate" delay={100}>
                     <RotateControl recipe={recipe} onChange={updateRecipe} />
                   </Section>
+                  {/* <Section icon={<RotateCw size={12} />} title="Background music" delay={110}>
+                    <BackgroundMusic
+                      musicFile={musicFile}
+                      setMusicFile={setMusicFile}
+                      musicVolume={musicVolume}
+                      setMusicVolume={setMusicVolume}
+                      originalAudioVolume={originalAudioVolume}
+                      setOriginalAudioVolume={setOriginalAudioVolume}
+                      loopMusic={loopMusic}
+                      setLoopMusic={setLoopMusic}
+                    />
+                  </Section> */}
                 </div>
                 <div className="bg-[var(--surface)] rounded-xl border border-[var(--border)] p-5 space-y-6">
                   <Section icon={<Volume2 size={12} />} title="Audio & Speed" delay={150}>
-                  <Section
-  icon={<SlidersHorizontal size={12} />}
-  title="Adjustments"
-  delay={175}
->
-  <div className="space-y-5">
+                    <Section
+                      icon={<SlidersHorizontal size={12} />}
+                      title="Adjustments"
+                      delay={175}
+                    >
+                      <div className="space-y-5">
 
-    {/* Brightness */}
-    <div className="space-y-2">
-      <div className="flex items-center justify-between text-xs">
-        <span>Brightness</span>
+                        {/* Brightness */}
+                        <div className="space-y-2">
+                          <div className="flex items-center justify-between text-xs">
+                            <span>Brightness</span>
 
-        <button
-          type="button"
-          onClick={() => updateRecipe({ brightness: 0 })}
-          className="text-film-500 hover:underline"
-        >
-          Reset
-        </button>
-      </div>
+                            <button
+                              type="button"
+                              onClick={() => updateRecipe({ brightness: 0 })}
+                              className="text-film-500 hover:underline"
+                            >
+                              Reset
+                            </button>
+                          </div>
 
-      <input
-        type="range"
-        min="-1"
-        max="1"
-        step="0.1"
-        value={recipe.brightness}
-        onChange={(e) =>
-          updateRecipe({
-            brightness: Number(e.target.value),
-          })
-        }
-        className="w-full"
-      />
-    </div>
+                          <input
+                            type="range"
+                            min="-1"
+                            max="1"
+                            step="0.1"
+                            value={recipe.brightness}
+                            onChange={(e) =>
+                              updateRecipe({
+                                brightness: Number(e.target.value),
+                              })
+                            }
+                            className="w-full"
+                          />
+                        </div>
 
-    {/* Contrast */}
-    <div className="space-y-2">
-      <div className="flex items-center justify-between text-xs">
-        <span>Contrast</span>
+                        {/* Contrast */}
+                        <div className="space-y-2">
+                          <div className="flex items-center justify-between text-xs">
+                            <span>Contrast</span>
 
-        <button
-          type="button"
-          onClick={() => updateRecipe({ contrast: 1 })}
-          className="text-film-500 hover:underline"
-        >
-          Reset
-        </button>
-      </div>
+                            <button
+                              type="button"
+                              onClick={() => updateRecipe({ contrast: 1 })}
+                              className="text-film-500 hover:underline"
+                            >
+                              Reset
+                            </button>
+                          </div>
 
-      <input
-        type="range"
-        min="0"
-        max="2"
-        step="0.1"
-        value={recipe.contrast}
-        onChange={(e) =>
-          updateRecipe({
-            contrast: Number(e.target.value),
-          })
-        }
-        className="w-full"
-      />
-    </div>
+                          <input
+                            type="range"
+                            min="0"
+                            max="2"
+                            step="0.1"
+                            value={recipe.contrast}
+                            onChange={(e) =>
+                              updateRecipe({
+                                contrast: Number(e.target.value),
+                              })
+                            }
+                            className="w-full"
+                          />
+                        </div>
 
-    {/* Saturation */}
-    <div className="space-y-2">
-      <div className="flex items-center justify-between text-xs">
-        <span>Saturation</span>
+                        {/* Saturation */}
+                        <div className="space-y-2">
+                          <div className="flex items-center justify-between text-xs">
+                            <span>Saturation</span>
 
-        <button
-          type="button"
-          onClick={() => updateRecipe({ saturation: 1 })}
-          className="text-film-500 hover:underline"
-        >
-          Reset
-        </button>
-      </div>
+                            <button
+                              type="button"
+                              onClick={() => updateRecipe({ saturation: 1 })}
+                              className="text-film-500 hover:underline"
+                            >
+                              Reset
+                            </button>
+                          </div>
 
-      <input
-        type="range"
-        min="0"
-        max="3"
-        step="0.1"
-        value={recipe.saturation}
-        onChange={(e) =>
-          updateRecipe({
-            saturation: Number(e.target.value),
-          })
-        }
-        className="w-full"
-      />
-    </div>
+                          <input
+                            type="range"
+                            min="0"
+                            max="3"
+                            step="0.1"
+                            value={recipe.saturation}
+                            onChange={(e) =>
+                              updateRecipe({
+                                saturation: Number(e.target.value),
+                              })
+                            }
+                            className="w-full"
+                          />
+                        </div>
 
-  </div>
-</Section>
+                      </div>
+                    </Section>
                     <AudioSpeedControl recipe={recipe} onChange={updateRecipe} />
                   </Section>
                   <Section icon={<SlidersHorizontal size={12} />} title="Output format" delay={190}>
@@ -218,15 +240,27 @@ export default function VideoEditor() {
                   <Section icon={<SlidersHorizontal size={12} />} title="Export quality" delay={200}>
                     <ExportSettings recipe={recipe} onChange={updateRecipe} />
                   </Section>
+                  <Section icon={<Layers size={12} />} title="Image overlay" delay={120}>
+                    <ImageOverlay
+                      overlayFile={overlayFile}
+                      setOverlayFile={setOverlayFile}
+                      overlayPosition={overlayPosition}
+                      setOverlayPosition={setOverlayPosition}
+                      overlaySize={overlaySize}
+                      setOverlaySize={setOverlaySize}
+                      overlayOpacity={overlayOpacity}
+                      setOverlayOpacity={setOverlayOpacity}
+                    />
+                  </Section>
                 </div>
               </div>
             )}
 
             {status === "error" && error && (
-                 <div
-                    role="status"
-                    className="flex items-start gap-3 p-4 bg-film-50 border border-film-200 rounded-xl text-film-800 text-sm animate-fade-in"
-                  >
+              <div
+                role="status"
+                className="flex items-start gap-3 p-4 bg-film-50 border border-film-200 rounded-xl text-film-800 text-sm animate-fade-in"
+              >
                 <AlertTriangle size={16} className="shrink-0 mt-0.5 text-film-500" />
                 <div className="flex-1">
                   <p className="font-heading font-bold text-sm">Error</p>
@@ -300,9 +334,9 @@ export default function VideoEditor() {
           <p className="text-[11px] font-heading text-[var(--muted)] tracking-wide">
             2026 Reframe. Free, open source, no login required.
           </p>
-<p className="text-[10px] text-[var(--muted)]">
-  All video processing happens locally in your browser using FFmpeg.wasm.
-</p>
+          <p className="text-[10px] text-[var(--muted)]">
+            All video processing happens locally in your browser using FFmpeg.wasm.
+          </p>
           <a
             href="https://github.com/magic-peach/reframe"
             target="_blank"

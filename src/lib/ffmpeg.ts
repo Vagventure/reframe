@@ -1,6 +1,6 @@
 import { FFmpeg } from "@ffmpeg/ffmpeg";
 import { fetchFile, toBlobURL } from "@ffmpeg/util";
-import { EditRecipe, ExportResult } from "./types";
+import { EditRecipe, ExportResult, BackgroundMusicOptions, ImageOverlayOptions } from "./types";
 import { getPresetById } from "./presets";
 import { simd } from "wasm-feature-detect";
 
@@ -31,7 +31,7 @@ export async function loadFFmpeg(signal?: AbortSignal): Promise<FFmpeg> {
     const isSimdSupported = await simd();
 
     // Dynamically set the core filename
-    const coreName = isSimdSupported ? "ffmpeg-core-simd" : "ffmpeg-core";
+    const coreName =  "ffmpeg-core";
 
     // Load FFmpeg using the dynamic URLs + the new signal parameter
     await ffmpeg.load({
@@ -110,7 +110,9 @@ export async function exportVideo(
   file: File,
   recipe: EditRecipe,
   onProgress: (percent: number) => void,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  musicOptions?: BackgroundMusicOptions,
+  overlayOptions?: ImageOverlayOptions
 ): Promise<ExportResult> {
   let targetW: number, targetH: number;
   if (recipe.preset === "custom") {
@@ -145,6 +147,21 @@ export async function exportVideo(
 
   await ffmpeg.writeFile(inputName, await fetchFile(file), { signal });
 
+  // Write music file into FFmpeg FS if provided
+  const hasMusicTrack = !!(musicOptions?.file && recipe.keepAudio);
+  const musicInputName = "music_input.mp3";
+  if (hasMusicTrack) {
+    await ffmpeg.writeFile(musicInputName, await fetchFile(musicOptions!.file!), { signal });
+  }
+
+  // Write overlay image into FFmpeg FS if provided
+  const hasOverlay = !!(overlayOptions?.file);
+  const overlayExt = overlayOptions?.file?.name.split(".").pop() ?? "png";
+  const overlayInputName = `overlay.${overlayExt}`;
+  if (hasOverlay) {
+    await ffmpeg.writeFile(overlayInputName, await fetchFile(overlayOptions!.file!), { signal });
+  }
+
   ffmpeg.on("progress", ({ progress }) => {
     onProgress(Math.min(99, Math.round(progress * 100)));
   });
@@ -155,13 +172,83 @@ export async function exportVideo(
   const afParts = [audioTrim, audioSpeed].filter(Boolean);
   const af = afParts.join(",");
 
-  const args = ["-i", inputName];
-  if (vf) args.push("-vf", vf);
+  // Input indices: video=0, music=1 (if present), overlay=1 or 2 depending on music
+  const musicIdx = 1;
+  const overlayIdx = hasMusicTrack ? 2 : 1;
 
-  if (!recipe.keepAudio) {
-    args.push("-an");
-  } else if (af) {
-    args.push("-af", af);
+  const args: string[] = [];
+  args.push("-i", inputName);
+  if (hasMusicTrack) {
+    if (musicOptions!.loopMusic) args.push("-stream_loop", "-1");
+    args.push("-i", musicInputName);
+  }
+  if (hasOverlay) {
+    args.push("-i", overlayInputName);
+  }
+
+  // Use filter_complex whenever we have overlay or music — -vf and -filter_complex are mutually exclusive
+  const needsFilterComplex = hasOverlay || hasMusicTrack;
+
+  if (needsFilterComplex) {
+    const filterParts: string[] = [];
+    let videoOut = "[0:v]";
+
+    // Base video filters
+    if (vf) {
+      filterParts.push(`[0:v]${vf}[vbase]`);
+      videoOut = "[vbase]";
+    }
+
+    // Overlay: scale + opacity + position
+    if (hasOverlay) {
+      const scaledW = overlayOptions!.size;
+      const alpha = (overlayOptions!.opacity / 100).toFixed(2);
+      const posMap: Record<string, string> = {
+        "top-left":     "20:20",
+        "top-right":    "W-w-20:20",
+        "bottom-left":  "20:H-h-20",
+        "bottom-right": "W-w-20:H-h-20",
+      };
+      const pos = posMap[overlayOptions!.position] ?? "W-w-20:H-h-20";
+      filterParts.push(`[${overlayIdx}:v]scale=${scaledW}:-1,colorchannelmixer=aa=${alpha}[logo]`);
+      filterParts.push(`${videoOut}[logo]overlay=${pos}[vout]`);
+      videoOut = "[vout]";
+    }
+
+    // Audio: mix original + music, or pass through with speed/trim
+    let audioOut = "";
+    if (recipe.keepAudio && hasMusicTrack) {
+      const musicVol = (musicOptions!.musicVolume / 100).toFixed(2);
+      const origVol  = (musicOptions!.originalAudioVolume / 100).toFixed(2);
+      const origChain = afParts.length > 0
+        ? `[0:a]${afParts.join(",")},volume=${origVol}[orig]`
+        : `[0:a]volume=${origVol}[orig]`;
+      filterParts.push(origChain);
+      filterParts.push(`[${musicIdx}:a]volume=${musicVol}[music]`);
+      filterParts.push(`[orig][music]amix=inputs=2:duration=first:dropout_transition=0[aout]`);
+      audioOut = "[aout]";
+    }
+
+    args.push("-filter_complex", filterParts.join(";"));
+    args.push("-map", videoOut);
+
+    if (!recipe.keepAudio) {
+      args.push("-an");
+    } else if (audioOut) {
+      args.push("-map", audioOut);
+    } else {
+      // Overlay only, no music — pass original audio, apply speed/trim if needed
+      args.push("-map", "0:a");
+      if (af) args.push("-af", af);
+    }
+  } else {
+    // Simple path — no filter_complex needed, existing behaviour unchanged
+    if (vf) args.push("-vf", vf);
+    if (!recipe.keepAudio) {
+      args.push("-an");
+    } else if (af) {
+      args.push("-af", af);
+    }
   }
 
   // Add codec-specific arguments based on selected format
@@ -202,15 +289,73 @@ export async function exportVideo(
   // If the requested format fails, try WebM as fallback
   if (exitCode !== 0) {
     const webmOutput = "output.webm";
-    const fallbackArgs = [
-      "-i", inputName,
-      ...(vf ? ["-vf", vf] : []),
-      ...(recipe.keepAudio ? (af ? ["-af", af] : []) : ["-an"]),
+
+    const fallbackArgs: string[] = [];
+    fallbackArgs.push("-i", inputName);
+    if (hasMusicTrack) {
+      if (musicOptions!.loopMusic) fallbackArgs.push("-stream_loop", "-1");
+      fallbackArgs.push("-i", musicInputName);
+    }
+    if (hasOverlay) fallbackArgs.push("-i", overlayInputName);
+
+    if (needsFilterComplex) {
+      const fbParts: string[] = [];
+      let fbVideoOut = "[0:v]";
+
+      if (vf) {
+        fbParts.push(`[0:v]${vf}[vbase]`);
+        fbVideoOut = "[vbase]";
+      }
+      if (hasOverlay) {
+        const scaledW = overlayOptions!.size;
+        const alpha = (overlayOptions!.opacity / 100).toFixed(2);
+        const posMap: Record<string, string> = {
+          "top-left":     "20:20",
+          "top-right":    "W-w-20:20",
+          "bottom-left":  "20:H-h-20",
+          "bottom-right": "W-w-20:H-h-20",
+        };
+        const pos = posMap[overlayOptions!.position] ?? "W-w-20:H-h-20";
+        fbParts.push(`[${overlayIdx}:v]scale=${scaledW}:-1,colorchannelmixer=aa=${alpha}[logo]`);
+        fbParts.push(`${fbVideoOut}[logo]overlay=${pos}[vout]`);
+        fbVideoOut = "[vout]";
+      }
+
+      let fbAudioOut = "";
+      if (recipe.keepAudio && hasMusicTrack) {
+        const musicVol = (musicOptions!.musicVolume / 100).toFixed(2);
+        const origVol  = (musicOptions!.originalAudioVolume / 100).toFixed(2);
+        const origChain = afParts.length > 0
+          ? `[0:a]${afParts.join(",")},volume=${origVol}[orig]`
+          : `[0:a]volume=${origVol}[orig]`;
+        fbParts.push(origChain);
+        fbParts.push(`[${musicIdx}:a]volume=${musicVol}[music]`);
+        fbParts.push(`[orig][music]amix=inputs=2:duration=first:dropout_transition=0[aout]`);
+        fbAudioOut = "[aout]";
+      }
+
+      fallbackArgs.push("-filter_complex", fbParts.join(";"));
+      fallbackArgs.push("-map", fbVideoOut);
+      if (!recipe.keepAudio) {
+        fallbackArgs.push("-an");
+      } else if (fbAudioOut) {
+        fallbackArgs.push("-map", fbAudioOut);
+      } else {
+        fallbackArgs.push("-map", "0:a");
+        if (af) fallbackArgs.push("-af", af);
+      }
+    } else {
+      if (vf) fallbackArgs.push("-vf", vf);
+      if (!recipe.keepAudio) fallbackArgs.push("-an");
+      else if (af) fallbackArgs.push("-af", af);
+    }
+
+    fallbackArgs.push(
       "-c:v", "libvpx-vp9",
       "-crf", String(recipe.quality),
       ...(recipe.keepAudio ? ["-c:a", "libopus"] : []),
       webmOutput,
-    ];
+    );
 
     const fallbackCode = await ffmpeg.exec(fallbackArgs, undefined, { signal });
     if (fallbackCode !== 0) throw new Error("Export failed");
@@ -219,6 +364,8 @@ export async function exportVideo(
     const blob = new Blob([new Uint8Array(data as Uint8Array)], { type: "video/webm" });
     await ffmpeg.deleteFile(inputName, { signal });
     await ffmpeg.deleteFile(webmOutput, { signal });
+    if (hasMusicTrack) await ffmpeg.deleteFile(musicInputName, { signal });
+    if (hasOverlay) await ffmpeg.deleteFile(overlayInputName, { signal });
 
     onProgress(100);
     return {
@@ -234,6 +381,8 @@ export async function exportVideo(
   const blob = new Blob([new Uint8Array(data as Uint8Array)], { type: mimeType });
   await ffmpeg.deleteFile(inputName, { signal });
   await ffmpeg.deleteFile(outputName, { signal });
+  if (hasMusicTrack) await ffmpeg.deleteFile(musicInputName, { signal });
+  if (hasOverlay) await ffmpeg.deleteFile(overlayInputName, { signal });
 
   onProgress(100);
   return {
