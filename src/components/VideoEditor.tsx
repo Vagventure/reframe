@@ -1,6 +1,5 @@
 "use client";
 
-
 import { useState, useRef, useEffect, useMemo } from "react";
 import { useVideoEditor } from "@/hooks/useVideoEditor";
 import FileUpload from "./FileUpload";
@@ -15,7 +14,7 @@ import FormatSelector from "./FormatSelector";
 import ExportSettings from "./ExportSettings";
 import ExportOverlay from "./ExportOverlay";
 import DownloadResult from "./DownloadResult";
-import ImageOverlay from "./ImageOverlay"
+import ImageOverlay from "./ImageOverlay";
 
 import { cn } from "@/lib/utils";
 import {
@@ -64,37 +63,37 @@ function KeyboardShortcutsPanel() {
   const [open, setOpen] = useState(false);
 
   const shortcuts: { keys: React.ReactNode[]; label: string }[] = [
-  {
-    keys: [
-      <Kbd key="ctrl">Ctrl</Kbd>,
-      <span key="plus1" className="text-[var(--muted)] text-xs">+</span>,
-      <Kbd key="shift">Shift</Kbd>,
-      <span key="plus2" className="text-[var(--muted)] text-xs">+</span>,
-      <Kbd key="e">E</Kbd>
-    ],
-    label: "Export video",
-  },
-  {
-    keys: [<Kbd key="m">M</Kbd>],
-    label: "Toggle audio mute",
-  },
-  {
-    keys: [<Kbd key="r">R</Kbd>],
-    label: "Reset all settings",
-  },
-  {
-    keys: [<Kbd key="esc">Esc</Kbd>],
-    label: "Cancel export",
-  },
-  {
-    keys: [<Kbd key="1">1</Kbd>, <span key="dash" className="text-[var(--muted)] text-xs">–</span>, <Kbd key="9">9</Kbd>],
-    label: "Switch preset by index",
-  },
-  {
-    keys: [<Kbd key="question">?</Kbd>],
-    label: "Toggle this panel",
-  },
-];
+    {
+      keys: [
+        <Kbd key="ctrl">Ctrl</Kbd>,
+        <span key="plus1" className="text-[var(--muted)] text-xs">+</span>,
+        <Kbd key="shift">Shift</Kbd>,
+        <span key="plus2" className="text-[var(--muted)] text-xs">+</span>,
+        <Kbd key="e">E</Kbd>
+      ],
+      label: "Export video",
+    },
+    {
+      keys: [<Kbd key="m">M</Kbd>],
+      label: "Toggle audio mute",
+    },
+    {
+      keys: [<Kbd key="r">R</Kbd>],
+      label: "Reset all settings",
+    },
+    {
+      keys: [<Kbd key="esc">Esc</Kbd>],
+      label: "Cancel export",
+    },
+    {
+      keys: [<Kbd key="1">1</Kbd>, <span key="dash" className="text-[var(--muted)] text-xs">–</span>, <Kbd key="9">9</Kbd>],
+      label: "Switch preset by index",
+    },
+    {
+      keys: [<Kbd key="question">?</Kbd>],
+      label: "Toggle this panel",
+    },
+  ];
 
   return (
     <div className="rounded-xl border border-[var(--border)] bg-[var(--surface)] animate-fade-in overflow-hidden">
@@ -278,7 +277,8 @@ export default function VideoEditor() {
                       recipe={recipe}
                       onChange={updateRecipe}
                       duration={duration}
-                      file={file} 
+                      file={file}
+                      videoRef={videoRef as React.RefObject<HTMLVideoElement>}
                     />
                   </Section>
                   <Section icon={<RotateCw size={12} />} title="Rotate" delay={100}>
@@ -287,7 +287,6 @@ export default function VideoEditor() {
                 </div>
                 <div className="bg-[var(--surface)] rounded-xl border border-[var(--border)] p-5 space-y-6">
                   <Section icon={<Volume2 size={12} />} title="Audio & Speed" delay={150}>
-
                     <AudioSpeedControl recipe={recipe} onChange={updateRecipe} />
                   </Section>
                   <Section
@@ -493,7 +492,7 @@ export default function VideoEditor() {
                   : "bg-[var(--border)] text-[var(--muted)] cursor-not-allowed"
               )}
             >
-             <Zap size={20} className={cn(file && !isProcessing && "animate-pulse")} />
+              <Zap size={20} className={cn(file && !isProcessing && "animate-pulse")} />
               {isProcessing ? "PROCESSING" : "EXPORT"}
             </button>
 
