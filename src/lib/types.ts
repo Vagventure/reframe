@@ -36,6 +36,17 @@ export interface EditRecipe {
   version: number;
 }
 
+export interface OverlayElement {
+  id: string;
+  type: "emoji" | "custom_image";
+  src: string;       
+  unicode?: string; 
+  x: number;   
+  y: number;         
+  scale: number;     
+  rotation: number; 
+}
+
 export type OverlayPosition =
   | "top-left"
   | "top-right"

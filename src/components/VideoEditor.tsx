@@ -17,11 +17,12 @@ import ExportSettings from "./ExportSettings";
 import ExportOverlay from "./ExportOverlay";
 import DownloadResult from "./DownloadResult";
 import ImageOverlay from "./ImageOverlay"
+import EmojiSelector from "./EmojiSelector";
 
 import { cn } from "@/lib/utils";
 import {
   Layers, Crop, Scissors, RotateCw, Volume2, Type,
-  SlidersHorizontal, Zap, AlertTriangle, Github, Copy
+  SlidersHorizontal, Zap, AlertTriangle, Github, Copy, Smile
 } from "lucide-react";
 import OnboardingTour from "./OnboardingTour";
 import { useKeyboardShortcuts } from "@/hooks/useKeyboardShortcuts";
@@ -219,6 +220,11 @@ export default function VideoEditor() {
     recommendedPreset,
     currentTime,
     toggleSound,
+    overlayElements,
+    addEmojiOverlay,
+    updateOverlayElement,
+    removeOverlayElement,
+    clearOverlayElements,
   } = useVideoEditor();
 
   useKeyboardShortcuts({
@@ -242,6 +248,7 @@ export default function VideoEditor() {
     text: false,
     audio: false,
     export: false,
+    emoji: false,
   });
 
   const toggleSection = (key: keyof typeof openSections) =>
@@ -365,6 +372,9 @@ export default function VideoEditor() {
                     selectedTextId={selectedTextId}
                     onSelectText={setSelectedTextId}
                     onUpdateText={handleUpdateTextOverlay}
+                    overlayElements={overlayElements}
+                    onUpdateOverlay={updateOverlayElement}
+                    onRemoveOverlay={removeOverlayElement}
                   />
 
                   <div className="mt-3">
@@ -432,6 +442,22 @@ export default function VideoEditor() {
                       onChange={updateRecipe}
                       selectedTextId={selectedTextId}
                       onSelectText={setSelectedTextId}
+                    />
+                  </AccordionSection>
+
+                  <AccordionSection
+                    id="emoji"
+                    icon={<Smile size={12} />}
+                    title="Elements"
+                    isOpen={openSections.emoji}
+                    onToggle={() => toggleSection("emoji")}
+                    delay={120}
+                  >
+                    <EmojiSelector
+                      overlayElements={overlayElements}
+                      onAdd={addEmojiOverlay}
+                      onRemove={removeOverlayElement}
+                      onClearAll={clearOverlayElements}
                     />
                   </AccordionSection>
                 </div>

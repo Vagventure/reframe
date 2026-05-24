@@ -1,11 +1,12 @@
 "use client";
 
 import { useState, useCallback, useEffect, useRef, useMemo } from "react";
-import { EditRecipe, ExportResult, ExportStatus, MAX_FILE_SIZE, OverlayPosition, isValidRecipe } from "@/lib/types";
+import { EditRecipe, ExportResult, ExportStatus, MAX_FILE_SIZE, OverlayPosition, OverlayElement, isValidRecipe } from "@/lib/types";
 import { DEFAULT_RECIPE, SPEED_STEPS } from "@/lib/constants";
 import { getPresetById } from "@/lib/presets";
 import { loadFFmpeg, exportVideo, terminateFFmpeg, FFmpegLoadError } from "@/lib/ffmpeg";
 import { suggestPreset } from "@/lib/presetSuggestion";
+import { getTwemojiUrl } from "@/lib/emojis";
 import { validateDimensions, getDownscaledDimensions } from "@/utils/video-validation";
 
 const DEFAULT_TITLE = "Reframe — Resize, trim, and export videos in your browser";
@@ -150,6 +151,42 @@ export function useVideoEditor() {
   const [overlayPosition, setOverlayPosition] = useState<OverlayPosition>("bottom-right");
   const [overlaySize, setOverlaySize] = useState(150);
   const [overlayOpacity, setOverlayOpacity] = useState(100);
+
+  const [overlayElements, setOverlayElements] = useState<OverlayElement[]>([]);
+
+  const addEmojiOverlay = useCallback((unicode: string) => {
+    // crypto.randomUUID() requires a secure context (HTTPS).
+    // Fall back to timestamp+random for HTTP dev environments.
+    const safeId =
+      typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+        ? crypto.randomUUID()
+        : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const newEl: OverlayElement = {
+      id: safeId,
+      type: "emoji",
+      src: getTwemojiUrl(unicode),
+      unicode,
+      x: 50,
+      y: 50,
+      scale: 1.0,
+      rotation: 0,
+    };
+    setOverlayElements((prev) => [...prev, newEl]);
+  }, []);
+
+  const updateOverlayElement = useCallback((id: string, patch: Partial<OverlayElement>) => {
+    setOverlayElements((prev) =>
+      prev.map((el) => (el.id === id ? { ...el, ...patch } : el))
+    );
+  }, []);
+
+  const removeOverlayElement = useCallback((id: string) => {
+    setOverlayElements((prev) => prev.filter((el) => el.id !== id));
+  }, []);
+
+  const clearOverlayElements = useCallback(() => {
+    setOverlayElements([]);
+  }, []);
   const [currentTime, setCurrentTime] = useState(0);
  const updateRecipe = useCallback((patch: Partial<EditRecipe>) => {
   setRecipe((prev) => {
@@ -455,7 +492,8 @@ export function useVideoEditor() {
           position: overlayPosition,
           size: overlaySize,
           opacity: overlayOpacity,
-        }
+        },
+        overlayElements
       );
       if (exportCancelledRef.current) return;
 
@@ -481,7 +519,7 @@ export function useVideoEditor() {
         exportAbortControllerRef.current = null;
       }
     }
-  }, [file, recipe, result, status, overlayFile, overlayPosition, overlaySize, overlayOpacity, duration, loopMusic, musicFile, musicVolume, originalAudioVolume]);
+  }, [file, recipe, result, status, overlayFile, overlayPosition, overlaySize, overlayOpacity, duration, loopMusic, musicFile, musicVolume, originalAudioVolume, overlayElements]);
 
 
   useEffect(() => {
@@ -669,5 +707,11 @@ export function useVideoEditor() {
     recommendedPreset,
     currentTime,
     toggleSound,
+    overlayElements,
+    setOverlayElements,
+    addEmojiOverlay,
+    updateOverlayElement,
+    removeOverlayElement,
+    clearOverlayElements,
   };
 }

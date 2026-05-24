@@ -1,31 +1,11 @@
 import { FFmpeg } from "@ffmpeg/ffmpeg";
 import { fetchFile, toBlobURL } from "@ffmpeg/util";
-import { EditRecipe, ExportResult, BackgroundMusicOptions, ImageOverlayOptions } from "./types";
+import { EditRecipe, ExportResult, BackgroundMusicOptions, ImageOverlayOptions, OverlayElement } from "./types";
 import { getPresetById } from "./presets";
 import { buildTextFilter } from "./text-overlay";
-import { simd } from "wasm-feature-detect";
 
-const CORE_BASE_URL = "https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.10/dist/umd";
+const EMOJI_RENDER_SIZE = 128; // px — SVGs rasterised at this size, scaled per element.scale
 
-// Added from main branch for subresource security verification
-const SRI_HASHES: Record<string, string> = {
-  "ffmpeg-core.js":   "sha384-sKfkiFtvUk+vexk+0EUhEh366190/4WpgUAsUvaxEfyg7+E1Zt5Y5hrsU808g8Q9",
-  "ffmpeg-core.wasm": "sha384-U1VDhkPYrM3wTCT4/vjSpSsKqG/UjljYrYCI4hBSJ02svbCkxuCi6U6u/peg5vpW",
-};
-
-// Added from main branch to perform secure binary verification
-async function fetchWithIntegrity(url: string, mimeType: string): Promise<string> {
-  const key = url.split("/").pop()!;
-  const integrity = SRI_HASHES[key];
-
-  if (!integrity) {
-    throw new Error(`[SRI] No hash found for: ${key}`);
-  }
-
-  const res = await fetch(url, { integrity, credentials: "omit" });
-  const blob = new Blob([await res.arrayBuffer()], { type: mimeType });
-  return URL.createObjectURL(blob);
-}
 
 let ffmpegInstance: FFmpeg | null = null;
 
@@ -58,24 +38,31 @@ export async function loadFFmpeg(
   try {
     ffmpeg.on("progress", handleProgress);
 
-    const isIsolated = typeof self !== "undefined" && self.crossOriginIsolated;
-    const baseURL = isIsolated
-      ? "https://unpkg.com/@ffmpeg/core-mt@0.12.6/dist/esm"
-      : "https://unpkg.com/@ffmpeg/core@0.12.6/dist/esm";
+    // CDN fallback chain — try jsDelivr first (most reliable behind proxies/firewalls),
+    // then unpkg. Both serve the same single-threaded @ffmpeg/core@0.12.6 ESM build.
+    // Single-threaded is intentional: the multi-thread build needs COOP/COEP headers
+    // (crossOriginIsolated) which most dev servers and many hosts do not set.
+    const CDN_CANDIDATES = [
+      "https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.6/dist/umd",
+      "https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd",
+    ];
 
-    await ffmpeg.load({
-      coreURL: await toBlobURL(`${baseURL}/ffmpeg-core.js`, "text/javascript"),
-      wasmURL: await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, "application/wasm"),
-      ...(isIsolated && {
-        workerURL: await toBlobURL(
-          `${baseURL}/ffmpeg-core.worker.js`,
-          "text/javascript"
-        ),
-      }),
-    }, { signal });
-
-    onProgress?.(100);
-    return ffmpeg;
+    let lastErr: unknown;
+    for (const baseURL of CDN_CANDIDATES) {
+      try {
+        const coreURL = await toBlobURL(`${baseURL}/ffmpeg-core.js`, "text/javascript");
+        const wasmURL = await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, "application/wasm");
+        await ffmpeg.load({ coreURL, wasmURL }, { signal });
+        // Success — break out of loop
+        onProgress?.(100);
+        return ffmpeg;
+      } catch (e) {
+        lastErr = e;
+        // This CDN failed — loop will try the next one
+      }
+    }
+    // All CDNs failed
+    throw lastErr;
   } catch (err) {
     if (ffmpegInstance === ffmpeg) {
       ffmpegInstance = null;
@@ -197,7 +184,10 @@ function buildArguments(
   hasOverlay: boolean,
   overlayInputName: string,
   overlayOptions: ImageOverlayOptions | undefined,
-  hasOriginalAudio: boolean
+  hasOriginalAudio: boolean,
+  // Emoji stickers: parallel arrays — filenames already written to FFmpeg VFS
+  emojiInputNames: string[] = [],
+  emojiElements: OverlayElement[] = [],
 ): string[] {
   const vf = buildVideoFilter(recipe, targetW, targetH);
   const audioTrim = hasOriginalAudio ? buildAudioTrimFilter(recipe) : "";
@@ -205,8 +195,13 @@ function buildArguments(
   const afParts = [audioTrim, audioSpeed].filter(Boolean);
   const af = afParts.join(",");
 
+  const hasEmojis = emojiInputNames.length > 0;
+
+  // Input index bookkeeping
+  // 0 = video, 1 = music (if any), next = imageOverlay (if any), then emojis
   const musicIdx = 1;
   const overlayIdx = hasMusicTrack ? 2 : 1;
+  const emojiStartIdx = 1 + (hasMusicTrack ? 1 : 0) + (hasOverlay ? 1 : 0);
 
   const args: string[] = [];
   args.push("-i", inputName);
@@ -217,19 +212,26 @@ function buildArguments(
   if (hasOverlay) {
     args.push("-i", overlayInputName);
   }
+  // Add emoji PNG inputs
+  for (const name of emojiInputNames) {
+    args.push("-i", name);
+  }
 
-  const needsFilterComplex = hasOverlay || hasMusicTrack;
+  // filter_complex is required whenever we have overlay, music, or emojis
+  const needsFilterComplex = hasOverlay || hasMusicTrack || hasEmojis;
   const shouldKeepAudio = recipe.keepAudio && (hasOriginalAudio || hasMusicTrack);
 
   if (needsFilterComplex) {
     const filterParts: string[] = [];
     let videoOut = "[0:v]";
 
+    // Apply video filters first (scale, eq, text, etc.)
     if (vf) {
       filterParts.push(`[0:v]${vf}[vbase]`);
       videoOut = "[vbase]";
     }
 
+    // Apply image overlay (logo/watermark)
     if (hasOverlay) {
       const scaledW = overlayOptions!.size;
       const alpha = (overlayOptions!.opacity / 100).toFixed(2);
@@ -241,16 +243,41 @@ function buildArguments(
       };
       const pos = posMap[overlayOptions!.position] ?? "W-w-20:H-h-20";
       filterParts.push(`[${overlayIdx}:v]scale=${scaledW}:-2,format=rgba,colorchannelmixer=aa=${alpha}[logo]`);
-      filterParts.push(`${videoOut}[logo]overlay=${pos}[vout]`);
-      videoOut = "[vout]";
+      filterParts.push(`${videoOut}[logo]overlay=${pos}[vafter_logo]`);
+      videoOut = "[vafter_logo]";
     }
 
+    // Daisy-chain each emoji sticker as an overlay
+    if (hasEmojis) {
+      emojiElements.forEach((el, i) => {
+        const inputLabel = `[${emojiStartIdx + i}:v]`;
+        const scaledSize = Math.round(EMOJI_RENDER_SIZE * el.scale);
+        // Centre the emoji on its (x%, y%) position
+        const pixelX = Math.round((el.x / 100) * targetW) - Math.round(scaledSize / 2);
+        const pixelY = Math.round((el.y / 100) * targetH) - Math.round(scaledSize / 2);
+        const emojiLabel = `[em${i}]`;
+        const outLabel = `[vem${i}]`;
+
+        if (el.rotation !== 0) {
+          // Scale + rotate into a labelled pad, then overlay
+          filterParts.push(
+            `${inputLabel}scale=${scaledSize}:${scaledSize},rotate=${el.rotation}*PI/180:c=none:ow=rotw(${el.rotation}*PI/180):oh=roth(${el.rotation}*PI/180)${emojiLabel}`
+          );
+        } else {
+          filterParts.push(`${inputLabel}scale=${scaledSize}:${scaledSize}${emojiLabel}`);
+        }
+        filterParts.push(`${videoOut}${emojiLabel}overlay=${pixelX}:${pixelY}${outLabel}`);
+        videoOut = outLabel;
+      });
+    }
+
+    // Audio mixing
     let audioOut = "";
     if (shouldKeepAudio) {
       if (hasMusicTrack) {
         const musicVol = (musicOptions!.musicVolume / 100).toFixed(2);
         if (hasOriginalAudio) {
-          const origVol  = (musicOptions!.originalAudioVolume / 100).toFixed(2);
+          const origVol = (musicOptions!.originalAudioVolume / 100).toFixed(2);
           const origChain = afParts.length > 0
             ? `[0:a]${afParts.join(",")},volume=${origVol}[orig]`
             : `[0:a]volume=${origVol}[orig]`;
@@ -271,6 +298,7 @@ function buildArguments(
     if (filterParts.length > 0) {
       args.push("-filter_complex", filterParts.join(";"));
     }
+    // Map the final video label (strip brackets for plain stream specifiers)
     args.push("-map", videoOut === "[0:v]" ? "0:v" : videoOut);
 
     if (!shouldKeepAudio) {
@@ -281,6 +309,7 @@ function buildArguments(
       args.push("-map", "0:a");
     }
   } else {
+    // Simple path: no filter_complex needed
     if (vf) args.push("-vf", vf);
     if (!shouldKeepAudio) {
       args.push("-an");
@@ -304,6 +333,70 @@ function buildArguments(
   return args;
 }
 
+/**
+ * Rasterises an emoji SVG URL to a PNG Uint8Array for FFmpeg.
+ *
+ * Strategy:
+ * 1. Fetch SVG text, blob-URL it, draw onto canvas (works when CORS allows).
+ * 2. If fetch/draw fails, fall back to drawing the unicode character as text
+ *    on a canvas — guaranteed to work offline / behind CORS restrictions.
+ */
+async function rasteriseSvgToPng(svgUrl: string, size: number, unicodeFallback?: string): Promise<Uint8Array> {
+  const canvasToUint8Array = (canvas: HTMLCanvasElement): Promise<Uint8Array> =>
+    new Promise((resolve, reject) => {
+      canvas.toBlob((pngBlob) => {
+        if (!pngBlob) { reject(new Error("Canvas toBlob failed")); return; }
+        pngBlob.arrayBuffer().then((buf) => resolve(new Uint8Array(buf)));
+      }, "image/png");
+    });
+
+  // Attempt 1: fetch SVG and draw via Image element
+  try {
+    const res = await fetch(svgUrl, { mode: "cors" });
+    if (!res.ok) throw new Error(`SVG fetch ${res.status}`);
+    const svgText = await res.text();
+    const blob = new Blob([svgText], { type: "image/svg+xml" });
+    const objectUrl = URL.createObjectURL(blob);
+
+    const pngData = await new Promise<Uint8Array>((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => {
+        const canvas = document.createElement("canvas");
+        canvas.width = size;
+        canvas.height = size;
+        const ctx = canvas.getContext("2d");
+        if (!ctx) { URL.revokeObjectURL(objectUrl); reject(new Error("No 2D context")); return; }
+        ctx.drawImage(img, 0, 0, size, size);
+        URL.revokeObjectURL(objectUrl);
+        canvasToUint8Array(canvas).then(resolve).catch(reject);
+      };
+      img.onerror = () => { URL.revokeObjectURL(objectUrl); reject(new Error("SVG img load failed")); };
+      img.src = objectUrl;
+    });
+    return pngData;
+  } catch (svgErr) {
+    console.warn("[emoji export] SVG fetch/draw failed, using text fallback:", svgErr);
+  }
+
+  // Attempt 2: draw unicode emoji as text on canvas (no network needed)
+  if (unicodeFallback) {
+    const canvas = document.createElement("canvas");
+    canvas.width = size;
+    canvas.height = size;
+    const ctx = canvas.getContext("2d");
+    if (ctx) {
+      const fontSize = Math.round(size * 0.8);
+      ctx.font = `${fontSize}px serif`;
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(unicodeFallback, size / 2, size / 2);
+      return canvasToUint8Array(canvas);
+    }
+  }
+
+  throw new Error(`Failed to rasterise emoji: ${svgUrl}`);
+}
+
 export async function exportVideo(
   ffmpeg: FFmpeg,
   file: File,
@@ -311,7 +404,8 @@ export async function exportVideo(
   onProgress: (percent: number) => void,
   signal?: AbortSignal,
   musicOptions?: BackgroundMusicOptions,
-  overlayOptions?: ImageOverlayOptions
+  overlayOptions?: ImageOverlayOptions,
+  overlayElements?: OverlayElement[]
 ): Promise<ExportResult> {
   const sessionId = buildSessionId();
   let targetW: number, targetH: number;
@@ -377,6 +471,27 @@ export async function exportVideo(
       cleanupFiles.add(overlayInputName);
     }
 
+    // ── Emoji sticker overlays — rasterise SVGs to PNG and write to VFS ────
+    const activeEmojis = (overlayElements ?? []);
+    const EMOJI_RENDER_SIZE = 128; // px — rasterise at 128px, FFmpeg will scale per element.scale
+    const emojiInputNames: string[] = [];
+
+    for (let i = 0; i < activeEmojis.length; i++) {
+      const el = activeEmojis[i]!;
+      const emojiName = `emoji_${sessionId}_${i}.png`;
+      try {
+        // Pass unicode as fallback so canvas text-draw works if SVG fetch fails
+        const pngData = await rasteriseSvgToPng(el.src, EMOJI_RENDER_SIZE, el.unicode);
+        await ffmpeg.writeFile(emojiName, pngData, { signal });
+        cleanupFiles.add(emojiName);
+        emojiInputNames.push(emojiName);
+        console.log(`[emoji export] ✓ rasterised emoji ${i}: ${el.unicode}`);
+      } catch (e) {
+        console.error(`[emoji export] ✗ failed emoji ${i}: ${el.unicode}`, e);
+        emojiInputNames.push(""); // skip failed emojis
+      }
+    }
+
     ffmpeg.on("progress", handleProgress);
 
     // ── Two-pass GIF export ──────────────────────────────────────────────────
@@ -432,11 +547,22 @@ export async function exportVideo(
     };
     ffmpeg.on("log", logListener);
 
+    // Build the valid emoji lists (skip any that failed to rasterise)
+    const validEmojiNames: string[] = [];
+    const validEmojiEls: OverlayElement[] = [];
+    activeEmojis.forEach((el, i) => {
+      if (emojiInputNames[i]) {
+        validEmojiNames.push(emojiInputNames[i]!);
+        validEmojiEls.push(el);
+      }
+    });
+
     // Attempt 1: Process with standard audio streams
     let args = buildArguments(
       recipe, recipe.format, outputName, inputName, targetW, targetH,
       hasMusicTrack, musicInputName, musicOptions,
-      hasOverlay, overlayInputName, overlayOptions, true
+      hasOverlay, overlayInputName, overlayOptions, true,
+      validEmojiNames, validEmojiEls,
     );
 
     let exitCode = await ffmpeg.exec(args, undefined, { signal });
@@ -447,7 +573,8 @@ export async function exportVideo(
       args = buildArguments(
         recipe, recipe.format, outputName, inputName, targetW, targetH,
         hasMusicTrack, musicInputName, musicOptions,
-        hasOverlay, overlayInputName, overlayOptions, false
+        hasOverlay, overlayInputName, overlayOptions, false,
+        validEmojiNames, validEmojiEls,
       );
       exitCode = await ffmpeg.exec(args, undefined, { signal });
     }
@@ -457,7 +584,8 @@ export async function exportVideo(
       args = buildArguments(
         recipe, "webm", fallbackOutputName, inputName, targetW, targetH,
         hasMusicTrack, musicInputName, musicOptions,
-        hasOverlay, overlayInputName, overlayOptions, !missingAudioDetected
+        hasOverlay, overlayInputName, overlayOptions, !missingAudioDetected,
+        validEmojiNames, validEmojiEls,
       );
 
       const fallbackCode = await ffmpeg.exec(args, undefined, { signal });

@@ -2,12 +2,13 @@
 "use client";
 
 import { useEffect, useRef, useState, useCallback, RefObject } from "react";
-import { EditRecipe, TextOverlay } from "@/lib/types";
+import { EditRecipe, TextOverlay, OverlayElement } from "@/lib/types";
 import { getPresetById } from "@/lib/presets";
 import { cn } from "@/lib/utils";
 import { Camera } from "lucide-react";
 import ComparisonPreview from "./ComparisonPreview";
 import DraggableTextOverlays from "./DraggableTextOverlays";
+import DraggableEmojiOverlays from "./DraggableEmojiOverlays";
 
 interface Props {
   file: File | null;
@@ -16,6 +17,9 @@ interface Props {
   selectedTextId?: string | null;
   onSelectText?: (id: string | null) => void;
   onUpdateText?: (id: string, updates: Partial<TextOverlay>) => void;
+  overlayElements?: OverlayElement[];
+  onUpdateOverlay?: (id: string, patch: Partial<OverlayElement>) => void;
+  onRemoveOverlay?: (id: string) => void;
 }
 
 export default function VideoPreview({
@@ -25,6 +29,9 @@ export default function VideoPreview({
   selectedTextId = null,
   onSelectText,
   onUpdateText,
+  overlayElements = [],
+  onUpdateOverlay,
+  onRemoveOverlay,
 }: Props) {
   const lastId = useRef(0);
   const urlRef = useRef<string | null>(null);
@@ -125,7 +132,7 @@ export default function VideoPreview({
   }, [recipe, videoRef]);
 
   /**
-   * Track preview container dimensions for text overlay positioning.
+   * Track preview container dimensions for overlay positioning.
    */
   useEffect(() => {
     const updateDimensions = () => {
@@ -139,8 +146,13 @@ export default function VideoPreview({
     };
 
     updateDimensions();
+    const observer = new ResizeObserver(updateDimensions);
+    if (previewContainerRef.current) observer.observe(previewContainerRef.current);
     window.addEventListener("resize", updateDimensions);
-    return () => window.removeEventListener("resize", updateDimensions);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("resize", updateDimensions);
+    };
   }, []);
 
   const overlay = (() => {
@@ -152,34 +164,27 @@ export default function VideoPreview({
 
     if (!preset) return null;
 
-    // Preview container is 16:9
     const containerW = 16;
     const containerH = 9;
-    const containerRatio = containerW / containerH;   // 1.777…
+    const containerRatio = containerW / containerH;
     const outputRatio = preset.width / preset.height;
 
     if (recipe.framing === "fit") {
-      // Letterbox: the output video fits entirely inside 16:9, padded with bars.
       if (outputRatio > containerRatio) {
-        // Wider output → pillarbox bars on top & bottom
         const contentH = (containerRatio / outputRatio) * 100;
         const barH = (100 - contentH) / 2;
         return { mode: "fit", barTop: `${barH}%`, barBottom: `${barH}%`, barLeft: "0", barRight: "0" };
       } else {
-        // Taller output → letterbox bars on left & right
         const contentW = (outputRatio / containerRatio) * 100;
         const barW = (100 - contentW) / 2;
         return { mode: "fit", barTop: "0", barBottom: "0", barLeft: `${barW}%`, barRight: `${barW}%` };
       }
     } else {
-      // Fill / crop: the output fills the entire 16:9 preview — show a box representing what survives the crop.
       if (outputRatio < containerRatio) {
-        // Output is taller → crops top & bottom
         const visibleH = (outputRatio / containerRatio) * 100;
         const cropH = (100 - visibleH) / 2;
         return { mode: "fill", barTop: `${cropH}%`, barBottom: `${cropH}%`, barLeft: "0", barRight: "0" };
       } else {
-        // Output is wider → crops left & right
         const visibleW = (containerRatio / outputRatio) * 100;
         const cropW = (100 - visibleW) / 2;
         return { mode: "fill", barTop: "0", barBottom: "0", barLeft: `${cropW}%`, barRight: `${cropW}%` };
@@ -202,7 +207,7 @@ export default function VideoPreview({
 
       const video = videoRef.current;
       if (video) {
-        e.preventDefault(); // Prevent default page scroll
+        e.preventDefault();
         if (video.paused) {
           video.play().catch(() => {});
         } else {
@@ -211,6 +216,9 @@ export default function VideoPreview({
       }
     }
   };
+
+  // Only render overlays once we have real container dimensions
+  const canRenderOverlays = !isLoading && containerDimensions.width > 0 && containerDimensions.height > 0;
 
   return (
     <>
@@ -244,7 +252,6 @@ export default function VideoPreview({
         {overlay && (
           <div className="absolute inset-0 pointer-events-none" aria-hidden="true">
             {overlay.mode === "fit" ? (
-              // Letterbox: semi-transparent bars outside the content area
               <>
                 <div className="absolute left-0 right-0 top-0 bg-black/50" style={{ height: overlay.barTop }} />
                 <div className="absolute left-0 right-0 bottom-0 bg-black/50" style={{ height: overlay.barBottom }} />
@@ -252,7 +259,6 @@ export default function VideoPreview({
                 <div className="absolute top-0 bottom-0 right-0 bg-black/50" style={{ width: overlay.barRight }} />
               </>
             ) : (
-              // Fill/crop: dashed border around the surviving area, dimmed outside
               <>
                 <div className="absolute left-0 right-0 top-0 bg-red-900/50" style={{ height: overlay.barTop }} />
                 <div className="absolute left-0 right-0 bottom-0 bg-red-900/50" style={{ height: overlay.barBottom }} />
@@ -273,7 +279,7 @@ export default function VideoPreview({
         )}
 
         {/* Draggable Text Overlays */}
-        {recipe && !isLoading && containerDimensions.width > 0 && (
+        {recipe && canRenderOverlays && (
           <DraggableTextOverlays
             recipe={recipe}
             containerWidth={containerDimensions.width}
@@ -281,6 +287,18 @@ export default function VideoPreview({
             selectedTextId={selectedTextId ?? null}
             onSelectText={onSelectText || (() => {})}
             onUpdateText={onUpdateText || (() => {})}
+          />
+        )}
+
+        {/* Draggable Emoji Sticker Overlays — always render when loaded so
+            elements are visible as soon as they're added (even if list starts empty) */}
+        {canRenderOverlays && onUpdateOverlay && onRemoveOverlay && (
+          <DraggableEmojiOverlays
+            elements={overlayElements}
+            containerWidth={containerDimensions.width}
+            containerHeight={containerDimensions.height}
+            onUpdate={onUpdateOverlay}
+            onRemove={onRemoveOverlay}
           />
         )}
 
