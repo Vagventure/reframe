@@ -17,7 +17,7 @@ import ExportSettings from "./ExportSettings";
 import ExportOverlay from "./ExportOverlay";
 import DownloadResult from "./DownloadResult";
 import ImageOverlay from "./ImageOverlay"
-import EmojiSelector from "./EmojiSelector";
+import Elements from "./Elements";
 
 import { cn } from "@/lib/utils";
 import {
@@ -453,7 +453,7 @@ export default function VideoEditor() {
                     onToggle={() => toggleSection("emoji")}
                     delay={120}
                   >
-                    <EmojiSelector
+                    <Elements
                       overlayElements={overlayElements}
                       onAdd={addEmojiOverlay}
                       onRemove={removeOverlayElement}
