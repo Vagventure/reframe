@@ -17,7 +17,7 @@ type SerializedFile = {
   data: ArrayBuffer;
 };
 
-type SerializedEmoji = {
+export type SerializedEmoji = {
   pngData: ArrayBuffer;
   x: number;
   y: number;
@@ -42,17 +42,12 @@ type ExportRequest = {
 };
 
 type LoadRequest = { type: "load" };
-
 type CancelRequest = { type: "cancel" };
-
 type TerminateRequest = { type: "terminate" };
-
 type WorkerCommand = LoadRequest | ExportRequest | CancelRequest | TerminateRequest;
 
 type ProgressPayload = { type: "progress"; percent: number };
-
 type ReadyPayload = { type: "ready" };
-
 type ResultPayload = {
   type: "result";
   id: string;
@@ -63,12 +58,15 @@ type ResultPayload = {
   height: number;
   format: "mp4" | "webm" | "mkv" | "gif";
 };
-
 type ErrorPayload = { type: "error"; id?: string; message: string };
-
 type CancelledPayload = { type: "cancelled"; id?: string };
 
 type WorkerResponse = ProgressPayload | ReadyPayload | ResultPayload | ErrorPayload | CancelledPayload;
+
+interface PositionCoords {
+  x: number;
+  y: number;
+}
 
 let ffmpeg: FFmpeg | null = null;
 let ffmpegLoaded = false;
@@ -79,7 +77,6 @@ async function fetchWithIntegrity(url: string, mimeType: string): Promise<string
   const key = url.split("/").pop()!;
   const integrity = SRI_HASHES[key];
 
-  // Fallback to standard fetch if SRI is missing (Prevents ffmpeg-core.worker.js from crashing the thread)
   if (!integrity) {
     const response = await fetch(url, { credentials: "omit" });
     const blob = new Blob([await response.arrayBuffer()], { type: mimeType });
@@ -136,15 +133,9 @@ function buildVideoFilter(recipe: EditRecipe, targetW: number, targetH: number):
     filters.push("hqdn3d=1.5:1.5:6:6");
   }
 
-  const needsEq =
-    recipe.brightness !== 0 ||
-    recipe.contrast !== 1 ||
-    recipe.saturation !== 1;
-
+  const needsEq = recipe.brightness !== 0 || recipe.contrast !== 1 || recipe.saturation !== 1;
   if (needsEq) {
-    filters.push(
-      `eq=brightness=${recipe.brightness}:contrast=${recipe.contrast}:saturation=${recipe.saturation}`
-    );
+    filters.push(`eq=brightness=${recipe.brightness}:contrast=${recipe.contrast}:saturation=${recipe.saturation}`);
   }
 
   const textOverlays = recipe.textOverlays || [];
@@ -158,24 +149,19 @@ function buildVideoFilter(recipe: EditRecipe, targetW: number, targetH: number):
 function buildAudioFilter(speed: number, normalizeAudio: boolean): string {
   if (speed <= 0) return "";
   const filters: string[] = [];
-
   let remaining = speed;
   while (remaining < 0.5) {
     filters.push("atempo=0.5");
     remaining /= 0.5;
   }
-
   while (remaining > 2.0) {
     filters.push("atempo=2.0");
     remaining /= 2.0;
   }
-
   if (Math.abs(remaining - 1.0) > 0.001) {
     filters.push(`atempo=${Number(remaining.toFixed(4))}`);
   }
-
   if (normalizeAudio) filters.push("loudnorm=I=-14:TP=-1.5:LRA=11");
-
   return filters.join(",");
 }
 
@@ -240,31 +226,26 @@ function buildArguments(
       videoOut = "[vbase]";
     }
 
-if (hasOverlay) {
-  const scaledW = overlayOptions!.size;
-  const alpha = (overlayOptions!.opacity / 100).toFixed(2);
-  const posMap: Record<string, string> = {
-    "top-left":     "20:20",
-    "top-right":    "W-w-20:20",
-    "bottom-left":  "20:H-h-20",
-    "bottom-right": "W-w-20:H-h-20",
-  };
+    if (hasOverlay) {
+      const scaledW = overlayOptions!.size;
+      const alpha = (overlayOptions!.opacity / 100).toFixed(2);
+      const posMap: Record<string, string> = {
+        "top-left":     "20:20",
+        "top-right":    "W-w-20:20",
+        "bottom-left":  "20:H-h-20",
+        "bottom-right": "W-w-20:H-h-20",
+      };
 
-interface PositionCoords {
-    x: number;
-    y: number;
-  }
+      const pos = typeof overlayOptions?.position === "string"
+        ? (posMap[overlayOptions.position] ?? "W-w-20:H-h-20")
+        : overlayOptions?.position
+        ? `(W-w)*${(overlayOptions.position as PositionCoords).x}/100:(H-h)*${(overlayOptions.position as PositionCoords).y}/100`
+        : "W-w-20:H-h-20";
 
-  const pos = typeof overlayOptions?.position === "string"
-    ? (posMap[overlayOptions.position] ?? "W-w-20:H-h-20")
-    : overlayOptions?.position
-    ? `(W-w)*${(overlayOptions.position as PositionCoords).x}/100:(H-h)*${(overlayOptions.position as PositionCoords).y}/100`
-    : "W-w-20:H-h-20";
-
-  filterParts.push(`[${overlayIdx}:v]scale=${scaledW}:-2,format=rgba,colorchannelmixer=aa=${alpha}[logo]`);
-  filterParts.push(`${videoOut}[logo]overlay=${pos}[vout]`);
-  videoOut = "[vout]";
-}
+      filterParts.push(`[${overlayIdx}:v]scale=${scaledW}:-2,format=rgba,colorchannelmixer=aa=${alpha}[logo]`);
+      filterParts.push(`${videoOut}[logo]overlay=${pos}[vout]`);
+      videoOut = "[vout]";
+    }
 
     // Daisy-chain emoji stickers as overlays
     if (hasEmojis) {
@@ -332,13 +313,7 @@ interface PositionCoords {
   }
 
   if (format === "webm") {
-    args.push(
-      "-c:v", "libvpx-vp9",
-      "-b:v", "0",
-      "-crf", String(recipe.quality),
-      "-cpu-used", "4",
-      "-deadline", "realtime"
-    );
+    args.push("-c:v", "libvpx-vp9", "-b:v", "0", "-crf", String(recipe.quality), "-cpu-used", "4", "-deadline", "realtime");
     if (shouldKeepAudio) args.push("-c:a", "libopus");
   } else if (format === "mkv") {
     args.push("-c:v", "libx264", "-crf", String(recipe.quality), "-preset", "ultrafast");
@@ -365,14 +340,12 @@ async function loadCore(onProgress?: (percent: number) => void): Promise<void> {
   }
 
   ffmpeg = new FFmpeg();
-
   const isIsolated = typeof self !== "undefined" && self.crossOriginIsolated;
   const baseURL = isIsolated ? MT_CORE_BASE_URL : CORE_BASE_URL;
 
   const handleProgress = ({ progress }: { progress: number }) => {
     onProgress?.(Math.round(progress * 100));
   };
-
   ffmpeg.on("progress", handleProgress);
 
   try {
@@ -383,7 +356,6 @@ async function loadCore(onProgress?: (percent: number) => void): Promise<void> {
         workerURL: await fetchWithIntegrity(`${baseURL}/ffmpeg-core.worker.js`, "text/javascript"),
       }),
     });
-
     ffmpegLoaded = true;
     onProgress?.(100);
   } finally {
@@ -397,36 +369,25 @@ function serializeFileBuffer(file: SerializedFile): Uint8Array {
 
 function getOutputConfig(format: string, sessionId: string) {
   switch (format) {
-    case "webm":
-      return { filename: `output_${sessionId}.webm`, mimeType: "video/webm" };
-    case "mkv":
-      return { filename: `output_${sessionId}.mkv`, mimeType: "video/x-matroska" };
-    case "gif":
-      return { filename: `output_${sessionId}.gif`, mimeType: "image/gif" };
-    default:
-      return { filename: `output_${sessionId}.mp4`, mimeType: "video/mp4" };
+    case "webm": return { filename: `output_${sessionId}.webm`, mimeType: "video/webm" };
+    case "mkv":  return { filename: `output_${sessionId}.mkv`, mimeType: "video/x-matroska" };
+    case "gif":  return { filename: `output_${sessionId}.gif`, mimeType: "image/gif" };
+    default:     return { filename: `output_${sessionId}.mp4`, mimeType: "video/mp4" };
   }
 }
 
 async function removeFile(path: string) {
   if (!ffmpeg) return;
-  try {
-    await ffmpeg.deleteFile(path);
-  } catch {
-    // ignore cleanup failures
-  }
+  try { await ffmpeg.deleteFile(path); } catch {}
 }
 
 async function runExport(request: ExportRequest): Promise<ResultPayload> {
   if (!ffmpeg) throw new Error("FFmpeg engine is not loaded.");
-  if (activeExportAbortController?.signal.aborted) {
-    throw new Error("Export cancelled");
-  }
+  if (activeExportAbortController?.signal.aborted) throw new Error("Export cancelled");
 
   const sessionId = request.id;
   const recipe = request.recipe;
-  let targetW: number;
-  let targetH: number;
+  let targetW: number, targetH: number;
 
   if (recipe.preset === "custom") {
     targetW = recipe.customWidth;
@@ -436,7 +397,6 @@ async function runExport(request: ExportRequest): Promise<ResultPayload> {
     targetW = preset?.width ?? 1920;
     targetH = preset?.height ?? 1080;
   }
-
   targetW = Math.round(targetW / 2) * 2;
   targetH = Math.round(targetH / 2) * 2;
 
@@ -448,16 +408,13 @@ async function runExport(request: ExportRequest): Promise<ResultPayload> {
   const paletteName = `palette_${sessionId}.png`;
   const cleanupFiles = new Set<string>([inputName, outputName, fallbackOutputName, paletteName]);
 
-  const fileBytes = serializeFileBuffer(request.file);
-  await ffmpeg.writeFile(inputName, fileBytes, { signal: activeExportAbortController?.signal });
+  await ffmpeg.writeFile(inputName, serializeFileBuffer(request.file), { signal: activeExportAbortController?.signal });
 
   const hasMusicTrack = !!(request.musicFile && recipe.keepAudio);
   const musicInputName = `music_input_${sessionId}.mp3`;
   if (hasMusicTrack) {
     cleanupFiles.add(musicInputName);
-    await ffmpeg.writeFile(musicInputName, serializeFileBuffer(request.musicFile!), {
-      signal: activeExportAbortController?.signal,
-    });
+    await ffmpeg.writeFile(musicInputName, serializeFileBuffer(request.musicFile!), { signal: activeExportAbortController?.signal });
   }
 
   const hasOverlay = !!request.overlayFile;
@@ -465,13 +422,10 @@ async function runExport(request: ExportRequest): Promise<ResultPayload> {
   const overlayInputName = `overlay_${sessionId}.${overlayExt}`;
   if (hasOverlay) {
     cleanupFiles.add(overlayInputName);
-    await ffmpeg.writeFile(overlayInputName, serializeFileBuffer(request.overlayFile!), {
-      signal: activeExportAbortController?.signal,
-    });
+    await ffmpeg.writeFile(overlayInputName, serializeFileBuffer(request.overlayFile!), { signal: activeExportAbortController?.signal });
   }
 
   const videoDuration = request.videoDuration;
-
   const handleProgress = ({ progress }: { progress: number }) => {
     if (activeExportId !== sessionId) return;
     postMessage({ type: "progress", percent: Math.min(99, Math.round(progress * 100)) });
@@ -484,56 +438,30 @@ async function runExport(request: ExportRequest): Promise<ResultPayload> {
     if (recipe.format === "gif") {
       const vf = buildVideoFilter(recipe, targetW, targetH);
       const vfWithPalette = vf ? `${vf},palettegen` : "palettegen";
-      const vfWithPaletteUse = vf
-        ? `[0:v]${vf}[x];[x][1:v]paletteuse`
-        : "[0:v][1:v]paletteuse";
+      const vfWithPaletteUse = vf ? `[0:v]${vf}[x];[x][1:v]paletteuse` : "[0:v][1:v]paletteuse";
 
       const gifDurationArgs = recipe.speed !== 1
         ? (() => {
             const sourceDuration = (recipe.trimEnd ?? videoDuration) - recipe.trimStart;
-            const outputDuration = sourceDuration / recipe.speed;
-            return ["-t", outputDuration.toFixed(6)];
+            return ["-t", (sourceDuration / recipe.speed).toFixed(6)];
           })()
         : [];
 
-      const pass1Code = await ffmpeg.exec(
-        ["-i", inputName, "-vf", vfWithPalette, ...gifDurationArgs, "-y", paletteName],
-        undefined,
-        { signal: activeExportAbortController?.signal }
-      );
+      const pass1Code = await ffmpeg.exec(["-i", inputName, "-vf", vfWithPalette, ...gifDurationArgs, "-y", paletteName], undefined, { signal: activeExportAbortController?.signal });
       if (pass1Code !== 0) throw new Error("GIF palette generation failed");
 
-      const pass2Code = await ffmpeg.exec(
-        ["-i", inputName, "-i", paletteName, "-lavfi", vfWithPaletteUse, ...gifDurationArgs, "-y", outputName],
-        undefined,
-        { signal: activeExportAbortController?.signal }
-      );
+      const pass2Code = await ffmpeg.exec(["-i", inputName, "-i", paletteName, "-lavfi", vfWithPaletteUse, ...gifDurationArgs, "-y", outputName], undefined, { signal: activeExportAbortController?.signal });
       if (pass2Code !== 0) throw new Error("GIF export failed");
 
-      const data = await ffmpeg.readFile(outputName, undefined, {
-        signal: activeExportAbortController?.signal,
-      });
-      const payload = (data as Uint8Array).buffer as ArrayBuffer;
-      return {
-        type: "result",
-        id: sessionId,
-        data: payload,
-        mimeType: "image/gif",
-        size: payload.byteLength,
-        width: targetW,
-        height: targetH,
-        format: "gif",
-      };
+      const data = await ffmpeg.readFile(outputName, undefined, { signal: activeExportAbortController?.signal });
+      const payload = (data as Uint8Array).buffer;
+      return { type: "result", id: sessionId, data: payload, mimeType: "image/gif", size: payload.byteLength, width: targetW, height: targetH, format: "gif" };
     }
 
     let missingAudioDetected = false;
-    const logListener = ({ message }: { message: string }) => {
+    logListener = ({ message }: { message: string }) => {
       const msg = message.toLowerCase();
-      if (
-        msg.includes("matches no streams") ||
-        msg.includes("specifier '0:a'") ||
-        msg.includes("input pad 0 on filter src")
-      ) {
+      if (msg.includes("matches no streams") || msg.includes("specifier '0:a'") || msg.includes("input pad 0 on filter src")) {
         missingAudioDetected = true;
       }
     };
@@ -546,9 +474,7 @@ async function runExport(request: ExportRequest): Promise<ResultPayload> {
       const em = request.emojiOverlays![i]!;
       const emojiName = `emoji_${sessionId}_${i}.png`;
       try {
-        await ffmpeg.writeFile(emojiName, new Uint8Array(em.pngData), {
-          signal: activeExportAbortController?.signal,
-        });
+        await ffmpeg.writeFile(emojiName, new Uint8Array(em.pngData), { signal: activeExportAbortController?.signal });
         cleanupFiles.add(emojiName);
         validEmojiNames.push(emojiName);
         validEmojiEls.push(em);
@@ -558,138 +484,50 @@ async function runExport(request: ExportRequest): Promise<ResultPayload> {
     }
 
     let args = buildArguments(
-      recipe,
-      recipe.format,
-      outputName,
-      inputName,
-      targetW,
-      targetH,
-      hasMusicTrack,
-      musicInputName,
-      request.musicOptions,
-      hasOverlay,
-      overlayInputName,
-      request.overlayOptions,
-      true,
-      videoDuration,
-      validEmojiNames,
-      validEmojiEls
+      recipe, recipe.format, outputName, inputName, targetW, targetH,
+      hasMusicTrack, musicInputName, request.musicOptions,
+      hasOverlay, overlayInputName, request.overlayOptions, true,
+      videoDuration, validEmojiNames, validEmojiEls
     );
 
-    let exitCode = await ffmpeg.exec(args, undefined, {
-      signal: activeExportAbortController?.signal,
-    });
+    let exitCode = await ffmpeg.exec(args, undefined, { signal: activeExportAbortController?.signal });
 
     if (exitCode !== 0 && missingAudioDetected) {
       missingAudioDetected = false;
       args = buildArguments(
-        recipe,
-        recipe.format,
-        outputName,
-        inputName,
-        targetW,
-        targetH,
-        hasMusicTrack,
-        musicInputName,
-        request.musicOptions,
-        hasOverlay,
-        overlayInputName,
-        request.overlayOptions,
-        false,
-        videoDuration,
-        validEmojiNames,
-        validEmojiEls
+        recipe, recipe.format, outputName, inputName, targetW, targetH,
+        hasMusicTrack, musicInputName, request.musicOptions,
+        hasOverlay, overlayInputName, request.overlayOptions, false,
+        videoDuration, validEmojiNames, validEmojiEls
       );
-      exitCode = await ffmpeg.exec(args, undefined, {
-        signal: activeExportAbortController?.signal,
-      });
+      exitCode = await ffmpeg.exec(args, undefined, { signal: activeExportAbortController?.signal });
     }
 
     if (exitCode !== 0) {
       args = buildArguments(
-        recipe,
-        "webm",
-        fallbackOutputName,
-        inputName,
-        targetW,
-        targetH,
-        hasMusicTrack,
-        musicInputName,
-        request.musicOptions,
-        hasOverlay,
-        overlayInputName,
-        request.overlayOptions,
-        !missingAudioDetected,
-        videoDuration,
-        validEmojiNames,
-        validEmojiEls
+        recipe, "webm", fallbackOutputName, inputName, targetW, targetH,
+        hasMusicTrack, musicInputName, request.musicOptions,
+        hasOverlay, overlayInputName, request.overlayOptions, !missingAudioDetected,
+        videoDuration, validEmojiNames, validEmojiEls
       );
 
-      const fallbackCode = await ffmpeg.exec(args, undefined, {
-        signal: activeExportAbortController?.signal,
-      });
+      const fallbackCode = await ffmpeg.exec(args, undefined, { signal: activeExportAbortController?.signal });
       if (fallbackCode !== 0) throw new Error("Export failed");
 
-      const data = await ffmpeg.readFile(fallbackOutputName, undefined, {
-        signal: activeExportAbortController?.signal,
-      });
-      const payload = (data as Uint8Array).buffer as ArrayBuffer;
-      return {
-        type: "result",
-        id: sessionId,
-        data: payload,
-        mimeType: "video/webm",
-        size: payload.byteLength,
-        width: targetW,
-        height: targetH,
-        format: "webm",
-      };
+      const data = await ffmpeg.readFile(fallbackOutputName, undefined, { signal: activeExportAbortController?.signal });
+      const payload = (data as Uint8Array).buffer;
+      return { type: "result", id: sessionId, data: payload, mimeType: "video/webm", size: payload.byteLength, width: targetW, height: targetH, format: "webm" };
     }
 
-    const data = await ffmpeg.readFile(outputName, undefined, {
-      signal: activeExportAbortController?.signal,
-    });
-    const payload = (data as Uint8Array).buffer as ArrayBuffer;
-    return {
-      type: "result",
-      id: sessionId,
-      data: payload,
-      mimeType: mimeType,
-      size: payload.byteLength,
-      width: targetW,
-      height: targetH,
-      format: recipe.format,
-    };
+    const data = await ffmpeg.readFile(outputName, undefined, { signal: activeExportAbortController?.signal });
+    const payload = (data as Uint8Array).buffer;
+    return { type: "result", id: sessionId, data: payload, mimeType: mimeType, size: payload.byteLength, width: targetW, height: targetH, format: recipe.format };
   } finally {
     ffmpeg.off("progress", handleProgress);
     if (logListener) ffmpeg.off("log", logListener);
     for (const path of cleanupFiles) {
       await removeFile(path);
     }
-  }
-}
-
-function handleWorkerMessage(event: MessageEvent<WorkerResponse>) {
-  const data = event.data;
-  if (data.type === "progress") {
-    postMessage(data);
-    return;
-  }
-  if (data.type === "ready") {
-    postMessage(data);
-    return;
-  }
-  if (data.type === "result") {
-    postMessage(data);
-    return;
-  }
-  if (data.type === "error") {
-    postMessage(data);
-    return;
-  }
-  if (data.type === "cancelled") {
-    postMessage(data);
-    return;
   }
 }
 

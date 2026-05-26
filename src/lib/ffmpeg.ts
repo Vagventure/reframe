@@ -17,7 +17,11 @@ const EMOJI_RENDER_SIZE = 128; // px — rasterised here, worker scales per elem
 
 // ─── Worker message types ─────────────────────────────────────────────────────
 
-type SerializedFile = { name: string; type: string; data: ArrayBuffer };
+type SerializedFile = { 
+  name: string; 
+  type: string; 
+  data: ArrayBuffer; 
+};
 
 export type SerializedEmoji = {
   pngData: ArrayBuffer;
@@ -41,19 +45,27 @@ type WorkerExportRequest = {
   emojiOverlays?: SerializedEmoji[];
 };
 
-type WorkerLoadResponse     = { type: "ready" };
+type WorkerLoadResponse = { type: "ready" };
 type WorkerProgressResponse = { type: "progress"; percent: number };
-type WorkerResultResponse   = {
-  type: "result"; id: string; data: ArrayBuffer;
-  mimeType: string; size: number; width: number; height: number;
+type WorkerResultResponse = {
+  type: "result";
+  id: string;
+  data: ArrayBuffer;
+  mimeType: string;
+  size: number;
+  width: number;
+  height: number;
   format: "mp4" | "webm" | "mkv" | "gif";
 };
-type WorkerErrorResponse     = { type: "error"; id?: string; message: string };
+type WorkerErrorResponse = { type: "error"; id?: string; message: string };
 type WorkerCancelledResponse = { type: "cancelled"; id?: string };
 
 type WorkerResponse =
-  | WorkerLoadResponse | WorkerProgressResponse | WorkerResultResponse
-  | WorkerErrorResponse | WorkerCancelledResponse;
+  | WorkerLoadResponse
+  | WorkerProgressResponse
+  | WorkerResultResponse
+  | WorkerErrorResponse
+  | WorkerCancelledResponse;
 
 // ─── Worker singleton ─────────────────────────────────────────────────────────
 
@@ -68,6 +80,40 @@ let pendingExport: {
 } | null = null;
 let pendingProgress: ((percent: number) => void) | null = null;
 
+function createWorker(): Worker {
+  if (typeof window === "undefined") {
+    throw new Error("Web Workers are not available in this environment.");
+  }
+
+  // MUST be strictly inline for Next.js/Webpack to detect and compile the worker chunk
+  ffmpegWorker = new Worker(new URL("./ffmpeg.worker.ts", import.meta.url), { type: "module" });
+  
+  ffmpegWorker.onmessage = handleWorkerMessage;
+  ffmpegWorker.onerror = (event) => {
+    const message = event.message || "FFmpeg worker error";
+    const error = new FFmpegLoadError(message);
+    workerReadyReject?.(error);
+    pendingExport?.reject(error);
+    resetWorker();
+  };
+
+  workerReady = new Promise((resolve, reject) => {
+    workerReadyResolve = resolve;
+    workerReadyReject = reject;
+  });
+
+  return ffmpegWorker;
+}
+
+function resetWorker() {
+  ffmpegWorker = null;
+  workerReady = null;
+  workerReadyResolve = null;
+  workerReadyReject = null;
+  pendingExport = null;
+  pendingProgress = null;
+}
+
 function handleWorkerMessage(event: MessageEvent<WorkerResponse>) {
   const data = event.data;
 
@@ -78,10 +124,12 @@ function handleWorkerMessage(event: MessageEvent<WorkerResponse>) {
     pendingProgress?.(100);
     return;
   }
+
   if (data.type === "progress") {
     pendingProgress?.(data.percent);
     return;
   }
+
   if (data.type === "result") {
     if (pendingExport?.id !== data.id) return;
     const blob = new Blob([data.data], { type: data.mimeType });
@@ -97,6 +145,7 @@ function handleWorkerMessage(event: MessageEvent<WorkerResponse>) {
     pendingProgress = null;
     return;
   }
+
   if (data.type === "error") {
     if (data.id && pendingExport?.id === data.id) {
       pendingExport.reject(new Error(data.message));
@@ -104,6 +153,7 @@ function handleWorkerMessage(event: MessageEvent<WorkerResponse>) {
       pendingProgress = null;
       return;
     }
+
     workerReadyReject?.(new FFmpegLoadError(data.message));
     workerReady = null;
     workerReadyResolve = null;
@@ -111,6 +161,7 @@ function handleWorkerMessage(event: MessageEvent<WorkerResponse>) {
     resetWorker();
     return;
   }
+
   if (data.type === "cancelled") {
     if (data.id && pendingExport?.id === data.id) {
       pendingExport.reject(new DOMException("Export cancelled", "AbortError"));
@@ -121,51 +172,18 @@ function handleWorkerMessage(event: MessageEvent<WorkerResponse>) {
   }
 }
 
-function createWorker(): Worker {
-  if (typeof window === "undefined") {
-    throw new Error("Web Workers are not available in this environment.");
+async function ensureWorker() {
+  if (!ffmpegWorker) {
+    createWorker();
   }
-  // MUST be strictly inline for Next.js/Webpack to detect and compile the worker chunk
-  ffmpegWorker = new Worker(new URL("./ffmpeg.worker.ts", import.meta.url), { type: "module" });
-  ffmpegWorker.onmessage = handleWorkerMessage;
-  ffmpegWorker.onerror = (event) => {
-    const error = new FFmpegLoadError(event.message || "FFmpeg worker error");
-    workerReadyReject?.(error);
-    pendingExport?.reject(error);
-    resetWorker();
-  };
-  workerReady = new Promise((resolve, reject) => {
-    workerReadyResolve = resolve;
-    workerReadyReject = reject;
-  });
-  return ffmpegWorker;
 }
-
-function resetWorker() {
-  ffmpegWorker = null;
-  workerReady = null;
-  workerReadyResolve = null;
-  workerReadyReject = null;
-  pendingExport = null;
-  pendingProgress = null;
-}
-
-function cancelPendingExport(reason?: unknown) {
-  if (pendingExport) {
-    pendingExport.reject(reason ?? new DOMException("Export cancelled", "AbortError"));
-    pendingExport = null;
-  }
-  pendingProgress = null;
-}
-
-// ─── Public API ───────────────────────────────────────────────────────────────
 
 export async function loadFFmpeg(
   signal?: AbortSignal,
   onProgress?: (percent: number) => void
 ): Promise<void> {
-  const isFirstLoad = !ffmpegWorker;
-  if (!ffmpegWorker) createWorker();
+  const isFirstLoad = !ffmpegWorker; 
+  await ensureWorker();
 
   if (workerReady && workerReadyResolve === null) {
     onProgress?.(100);
@@ -183,17 +201,31 @@ export async function loadFFmpeg(
     throw new DOMException("Aborted", "AbortError");
   }
 
+  const cleanup = () => {
+    signal?.removeEventListener("abort", onAbort);
+  };
+
   const onAbort = () => {
     ffmpegWorker?.postMessage({ type: "cancel" });
     workerReadyReject?.(new DOMException("Aborted", "AbortError"));
+    cleanup();
   };
+
   signal?.addEventListener("abort", onAbort, { once: true });
 
   try {
     await workerReady;
   } finally {
-    signal?.removeEventListener("abort", onAbort);
+    cleanup();
   }
+}
+
+function cancelPendingExport(reason?: unknown) {
+  if (pendingExport) {
+    pendingExport.reject(reason ?? new DOMException("Export cancelled", "AbortError"));
+    pendingExport = null;
+  }
+  pendingProgress = null;
 }
 
 /**
@@ -209,7 +241,6 @@ async function rasteriseEmojiToPng(svgUrl: string, size: number, unicode: string
       }, "image/png");
     });
 
-  // Attempt 1: fetch SVG → blob URL → draw via Image
   try {
     const res = await fetch(svgUrl, { mode: "cors" });
     if (!res.ok) throw new Error(`SVG fetch ${res.status}`);
@@ -234,7 +265,6 @@ async function rasteriseEmojiToPng(svgUrl: string, size: number, unicode: string
     console.warn(`[emoji] SVG fetch failed for ${unicode}, using text fallback:`, e);
   }
 
-  // Attempt 2: draw unicode char as text on canvas (no network needed)
   const canvas = document.createElement("canvas");
   canvas.width = size; canvas.height = size;
   const ctx = canvas.getContext("2d")!;
@@ -258,7 +288,6 @@ export async function exportVideo(
   if (!ffmpegWorker) throw new Error("FFmpeg worker is not available.");
 
   const sessionId = buildSessionId();
-
   const arrayBuffer = await file.arrayBuffer();
   const filePayload: SerializedFile = { name: file.name, type: file.type || "video/mp4", data: arrayBuffer };
 
