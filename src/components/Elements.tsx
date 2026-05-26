@@ -85,7 +85,7 @@ export default function Elements({ overlayElements, onAdd, onRemove, onClearAll 
             </button>
           </div>
 
-          <ul className="space-y-1 max-h-24 overflow-y-auto pr-0.5">
+          <ul className="space-y-1 max-h-24 overflow-y-auto pr-0.5 elements-blended-scrollbar">
             {overlayElements.map((el) => (
               <li
                 key={el.id}
